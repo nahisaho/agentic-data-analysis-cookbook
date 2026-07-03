@@ -106,7 +106,7 @@ description: >
   等と依頼した場合、または `.github/skills/*-loader` が出力した標準形式ラマンスペクトルが渡された場合に呼び出す。
   ベースライン補正や積み重ねスペクトル比較は対象外（別Skillで扱う）。
 license: MIT
-compatibility: python>=3.11, numpy, scipy, pandas, matplotlib
+compatibility: python>=3.11, scipy>=1.11,<2.0, numpy, pandas, matplotlib
 # 注：agentskills.io の allowed-tools は experimental field でクライアント実装依存。
 # 本書の初版では第6章の承認ゲートを1件ずつ確認する運用にするため、
 # frontmatter に allowed-tools は記載しない（すべての書き込み・実行は個別に承認）。
@@ -159,6 +159,7 @@ compatibility: python>=3.11, numpy, scipy, pandas, matplotlib
 - 必須メタデータ（`laser_wavelength_nm`, `integration_time_s`, `sample_id`）欠落
 - `references/` を参照せず本文だけで判断すること
 - ベースライン補正・積み重ね比較・第2主成分分析への流用（別Skill）
+- **`discussion` および Agent のチャット応答で、物質同定・ピーク帰属・物理的妥当性を推測すること**（第10章の文献照合Skillおよび第12章の実行後検証に委ねる）
 
 ## ⑥再現性条件
 - SciPy `find_peaks(prominence=0.1, distance=20)` を既定値とする（要件により変更可、変更時はプロンプトに明記）
@@ -182,10 +183,14 @@ compatibility: python>=3.11, numpy, scipy, pandas, matplotlib
    fwhm_cm_inv = right_x - left_x  # cm⁻¹ 単位
    ```
    等間隔サンプリングであれば `widths * np.median(np.diff(x))` でも近似できる（非等間隔では不可）
-5. 各ピークの `confidence` を次式で算出する（v1.0.0 の簡易指標）：
-   ```
-   noise_std   = std(intensity - moving_average(intensity, window=51))  # ピーク近傍を含む場合は分位点で緩和
-   confidence  = min(1.0, prominence_i / (5 * noise_std))
+5. 各ピークの `confidence` を次式で算出する（v1.0.0 の簡易指標）。`prominences` は step 3 の `find_peaks` 戻り値 `props["prominences"]`、`noise_std` は 0 割りを防ぐため下限値を設ける：
+   ```python
+   from scipy.ndimage import uniform_filter1d
+   ma = uniform_filter1d(intensity, size=51, mode="nearest")  # 移動平均
+   noise_std = float(np.std(intensity - ma))
+   noise_std = max(noise_std, 1e-12)                          # 0 割り防止
+   prominences = props["prominences"]
+   confidence  = np.minimum(1.0, prominences / (5 * noise_std))
    ```
    より精密な指標に置き換える場合は `discussion` にその定義を明記する
 6. matplotlib で「スペクトル＋検出ピークマーカー」の図を生成し、`plot_path` に保存
@@ -196,7 +201,8 @@ compatibility: python>=3.11, numpy, scipy, pandas, matplotlib
 
 ```
 このラマンスペクトル（CSV）のピーク位置と幅を教えて。
-波数校正済みのシリコン基準サンプル。prominence は既定値でよい。
+prominence は既定値でよい。
+物質同定・ピーク帰属・物理的妥当性の推測は行わず、検出された数値だけを要約してください。
 ```
 
 Agent は以下の順で処理する：
@@ -239,7 +245,7 @@ Agent は以下の順で処理する：
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["position_cm_inv", "intensity", "fwhm_cm_inv"],
+        "required": ["position_cm_inv", "intensity", "fwhm_cm_inv", "confidence"],
         "properties": {
           "position_cm_inv": {"type": "number", "minimum": 100, "maximum": 4000},
           "intensity":       {"type": "number"},
@@ -286,12 +292,16 @@ def validate(df: pd.DataFrame, meta: dict) -> list[str]:
     if not (512 <= len(x) <= 16384):
         errors.append(f"fatal: x length {len(x)} outside 512..16384")
     # 欠損率：5% 超は warning、30% 超は fatal
+    # `is_missing` 列があればそれを使い、なければ x/intensity の NaN から欠損マスクを作る
     if "is_missing" in df:
-        rate = float(df["is_missing"].mean())
-        if rate > 0.30:
-            errors.append(f"fatal: missing rate {rate:.1%} exceeds 30%")
-        elif rate > 0.05:
-            errors.append(f"warning: missing rate {rate:.1%} exceeds 5% (record in discussion)")
+        missing_mask = df["is_missing"].astype(bool).to_numpy()
+    else:
+        missing_mask = df[["x", "intensity"]].isna().any(axis=1).to_numpy()
+    rate = float(missing_mask.mean())
+    if rate > 0.30:
+        errors.append(f"fatal: missing rate {rate:.1%} exceeds 30%")
+    elif rate > 0.05:
+        errors.append(f"warning: missing rate {rate:.1%} exceeds 5% (record in discussion)")
     return errors
 
 def _split(errors: list[str]) -> tuple[list[str], list[str]]:
@@ -378,26 +388,34 @@ copilot
 
 第5章で使った合成スペクトル（3本ピーク：520, 1332, 2900 cm⁻¹）で追体験します。
 
-### 実行例（成功）
+### 実行例（成功）— 実機検証済み
+
+/tmp/arim-ch9 で seed=42 の合成スペクトル（3本ピーク：520/1332/2900 cm⁻¹、Lorentzian 幅 w=4/5/12 cm⁻¹）を用いて検証した実測値です。
 
 ```
 User: raman_synth.csv のピーク位置と幅を教えて（prominence=0.1, distance=20）
+      物質同定・ピーク帰属・物理的妥当性の推測は行わず、検出された数値だけを要約すること。
 
 Agent:
+  ● skill(raman-peak-detection)   ← Copilot が description で自動発見
   ● Skill: raman-loader → 標準形式 (points=1024, calibrated=True)
   ● Skill: raman-peak-detection
     - validate_input.py OK
     - find_peaks: 3 peaks
-    - peak_widths: FWHM 4.1 / 5.3 / 12.7 cm⁻¹
+    - peak_widths → x へ補間: FWHM 8.93 / 10.43 / 27.03 cm⁻¹
+    - noise_std = 0.062  (window=51 移動平均残差)
     - plot saved: peaks.png
   出力:
     peaks: [
-      {position_cm_inv: 520,  intensity: 0.98, fwhm_cm_inv: 4.1,  confidence: 0.95},
-      {position_cm_inv: 1332, intensity: 0.72, fwhm_cm_inv: 5.3,  confidence: 0.91},
-      {position_cm_inv: 2897, intensity: 0.55, fwhm_cm_inv: 12.7, confidence: 0.83}
+      {position_cm_inv: 519.65,  intensity: 0.975, fwhm_cm_inv: 8.93,  confidence: 1.00},
+      {position_cm_inv: 1331.96, intensity: 0.704, fwhm_cm_inv: 10.43, confidence: 1.00},
+      {position_cm_inv: 2900.88, intensity: 0.538, fwhm_cm_inv: 27.03, confidence: 1.00}
     ]
     discussion: "主要ピーク3本を検出。Skill v1.0.0, prominence=0.1, distance=20."
 ```
+
+> [!NOTE]
+> **理論値との比較**：Lorentzian の FWHM は `2w` なので理論値は 8/10/24 cm⁻¹。1本目・2本目はほぼ一致し、3本目のみ 27.03 と理論値 24 から約 12% 大きく出ています。原因は（a）グリッド間隔 ~2.93 cm⁻¹ による半値位置の補間誤差、（b）S/N が低い（強度 0.55 に対しノイズ std 0.062）ためです。実データでも FWHM は装置分解能に依存するため、絶対値の一致より**同一測定条件で比較したときの相対値**として扱うのが実務です（物理的妥当性の判定は第12章）。
 
 ### 失敗例と原因
 
@@ -406,7 +424,8 @@ Agent:
 | ピークが**0本** | prominence が入力の振幅レンジに対し大きすぎ | 評価基準1（正確性）の評価サンプル |
 | ピーク位置が**5〜10 cm⁻¹ ずれる** | 波数校正未実施（`calibrated=False` を素通し） | §9.4 ⑤fatal 拒否条件、§9.5 scripts で拒否 |
 | ピークが**大量**（>30本） | ノイズが優勢／`prominence=0` の指定を受け入れた | ⑥再現性条件のパラメータ固定、意味検証で警告 |
-| 「これはグラファイトのGバンド…」と物質同定してくる | AI が④考察で推測 | §9.6 WARNING、⑤禁止事項に明記 |
+| 「これはグラファイトのGバンド…」と物質同定してくる | AI が④考察またはチャット応答で推測 | §9.6 WARNING、⑤禁止事項（物質同定禁止 bullet） |
+| FWHM が **サンプル点数単位**で出力される | `peak_widths` の戻り値をそのまま cm⁻¹ 扱い | §9.4 実行手順4、意味層の型・単位検証 |
 
 ### 改善版：失敗例1（0本）の修正
 
@@ -445,7 +464,7 @@ Agent:
 
 1. **自分の分析Skillを書く**：第7章ワーク・第8章ワークで作成した仕様書・データ辞書・スキーマを統合し、`.github/skills/<name>/SKILL.md` を1本完成させなさい。§9.4 の骨格に沿い、①〜⑥＋実行手順＋使用例プロンプトを含めること。
 2. **references/ と scripts/ を書く**：§9.5 の例に倣い、`input-schema.json`・`output-schema.json`・`validate_input.py`・`data-dictionary.md` を作成せよ。`validate_input.py` は fatal 条件を最低3件検出できること。
-3. **セルフレビュー**：§9.8 の6基準チェックリストで自作Skillをレビューし、**NG項目を1件以上、SKILL.md 修正で解消**しなさい（修正前後の差分を残すこと）。
+3. **セルフレビュー**：§9.8 の6基準チェックリストで自作Skillをレビューし、**NG項目を1件以上、SKILL.md / `references/` / `scripts/` のいずれかの修正で解消**しなさい（修正前後の差分を残すこと）。
 4. **失敗例を1つ作って直す**：§9.9 のように、意図的に失敗する入力（例：`calibrated=False`／欠損率50%）を作り、fatal 拒否が正しく動くかを確認しなさい。
 5. **転用計画**：§9.10 の表に倣い、自装置のデータ型を1つ選び、「変わる部分／変わらない部分」を各3項目以上、Markdown で書き出しなさい（第10・11章、第13章で使用）。
 

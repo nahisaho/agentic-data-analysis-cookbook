@@ -84,10 +84,11 @@ source .venv/bin/activate
 
 ```bash
 pip install jupyterlab==4.4.1 jupyter-collaboration==4.0.2 jupyter-mcp-tools ipykernel pycrdt
+pip install pandas numpy scipy matplotlib
 ```
 
 > [!NOTE]
-> `jupyter-collaboration` と `pycrdt` は、Jupyter MCP がノートブックの変更をリアルタイムに読み書きするために必要です。バージョンを固定しているのは、組み合わせによる不整合を避けるためです。将来のバージョンでも動作しますが、問題が出たら本書のバージョンに合わせてください。
+> `jupyter-collaboration` と `pycrdt` は、Jupyter MCP がノートブックの変更をリアルタイムに読み書きするために必要です。バージョンを固定しているのは、組み合わせによる不整合を避けるためです。将来のバージョンでも動作しますが、問題が出たら本書のバージョンに合わせてください。2行目の `pandas / numpy / scipy / matplotlib` は、第5章以降の分析セッションで使う基本ライブラリです。
 
 続けて、この仮想環境を JupyterLab のカーネルとして登録します。これにより、後続章で**常に同じ環境（同じパッケージ）**でノートブックを実行でき、再現性が高まります。
 

@@ -1,0 +1,117 @@
+# SHIKIGAMI Project Manifest
+# Generated: 2026-07-03
+# Version: 1.17.0
+
+project:
+  id: "pj00001"
+  name: "ARIMAgentDataAnalysisBook"
+  folder: "pj00001_ARIMAgentDataAnalysisBook_20260703"
+  created: "2026-07-03"
+  status: "planning"  # planning | in-progress | completed | archived
+
+# 成果物定義（プロジェクト開始時に確定）
+deliverables:
+  # 必須成果物
+  required:
+    - id: "executive_summary"
+      name: "エグゼクティブサマリー"
+      type: "report"
+      status: "not_started"  # not_started | in_progress | draft | review | completed
+      file: null  # 生成後にファイルパスを記入
+      
+    - id: "main_report"
+      name: "本編レポート"
+      type: "report"
+      status: "not_started"
+      file: null
+      sections:
+        - "1. 調査背景・目的"
+        - "2. 調査方法"
+        - "3. 調査結果"
+        - "4. 分析・考察"
+        - "5. 結論・提言"
+        - "6. 参考文献"
+
+  # 条件付き成果物（プロジェクトタイプに応じて有効化）
+  conditional:
+    - id: "financial_plan"
+      name: "財務計画"
+      type: "report"
+      status: "not_started"
+      file: null
+      enabled: false  # business_proposalプロジェクトではtrueに変更
+      sections:
+        - "収支計画"
+        - "3シナリオ分析（楽観・基本・悲観）"
+        - "投資回収計画"
+        - "リスク要因"
+      
+    - id: "competitor_analysis"
+      name: "競合分析"
+      type: "report"
+      status: "not_started"
+      file: null
+      enabled: false
+      
+    - id: "market_research"
+      name: "市場調査"
+      type: "report"
+      status: "not_started"
+      file: null
+      enabled: false
+
+  # 補足資料
+  appendices:
+    - id: "sources"
+      name: "情報ソース一覧"
+      type: "data"
+      status: "not_started"
+      file: null
+      
+    - id: "raw_data"
+      name: "収集データ"
+      type: "data"
+      status: "not_started"
+      file: null
+
+# フェーズ管理
+phases:
+  - id: "phase1"
+    name: "目的探索"
+    status: "not_started"  # not_started | in_progress | completed
+    gate_passed: false
+    completed_at: null
+    
+  - id: "phase2"
+    name: "深層リサーチ"
+    status: "not_started"
+    gate_passed: false
+    completed_at: null
+    
+  - id: "phase3"
+    name: "フレームワーク分析"
+    status: "not_started"
+    gate_passed: false
+    completed_at: null
+    
+  - id: "phase4"
+    name: "レポート生成"
+    status: "not_started"
+    gate_passed: false
+    completed_at: null
+
+# 品質チェックリスト
+quality:
+  sources_verified: false      # 参考文献URL検証済み
+  hallucination_check: false   # ハルシネーションチェック済み
+  peer_review: false           # ピアレビュー実施済み
+  final_approval: false        # 最終承認済み
+
+# メタデータ
+metadata:
+  created_by: "shikigami-cli"
+  shikigami_version: "2.1.2"
+  last_updated: "2026-07-03"
+
+# キーワード（v1.7.0: ナレッジ連携用）
+keywords: []

@@ -90,8 +90,12 @@ with pm.Model() as model:
 > # 予測時
 > with model:
 >     pm.set_data({"x": x_new}, coords={"sample": np.arange(len(x_new))})
->     idata_pred = pm.sample_posterior_predictive(idata, random_seed=42)
+>     idata_pred = pm.sample_posterior_predictive(
+>         idata, predictions=True, random_seed=42,
+>     )   # predictions=True で観測 y との整合を要求せず、in/out-of-sample を分離
 > ```
+>
+> **`predictions=True` を付ける理由**：`observed=y_data` は fit 時の値に固定されており、`dims="sample"` を通じて `sample` 座標に紐付いています。`predictions=True` を付けないと、`set_data` で `sample` 長を変えたときに **観測 y（長さ n）と新座標（長さ len(x_new)）の shape 不整合**で `CoordinateValidationError` になります。`predictions=True` は out-of-sample 予測専用のパスに切り替え、結果は `idata_pred.predictions` に格納されます（`posterior_predictive` ではありません）。
 
 > [!TIP]
 > **命名規則**：Skill 仕様書 ⑤（禁止事項）と揃えて、パラメータ名は **snake_case・単位付きコメント**を推奨します（`alpha  # eV, offset`）。ArviZ の可視化で名前がそのまま軸ラベルになるため、後から書き換えるコストが大きい。

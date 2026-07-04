@@ -74,12 +74,20 @@ created: YYYY-MM-DD
 ```python
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import cross_validate, GroupKFold
+from sklearn.model_selection import cross_validate, GroupKFold, KFold
 from sklearn.linear_model import Ridge
 
 pipe = Pipeline([("sc", StandardScaler()), ("m", Ridge(alpha=1.0))])
-cv = GroupKFold(n_splits=5)   # groups が必要な場合のみ
-res = cross_validate(pipe, X, y, cv=cv, groups=group_key,
+
+# group_key の有無で CV を切り替え（無いのに GroupKFold を使うと落ちる）
+if group_key is not None:
+    cv = GroupKFold(n_splits=5)
+    cv_kwargs = {"cv": cv, "groups": group_key}
+else:
+    cv = KFold(n_splits=5, shuffle=True, random_state=0)
+    cv_kwargs = {"cv": cv}
+
+res = cross_validate(pipe, X, y, **cv_kwargs,
                      scoring=("neg_root_mean_squared_error", "r2"),
                      return_train_score=True, return_indices=True)
 ```
@@ -123,18 +131,27 @@ task_type: dimensionality_reduction | clustering | anomaly_detection
 ### A.3.2 安定性測定関数（第6章 §6.2）
 
 ```python
-def bootstrap_stability(estimator, X, n_boot=50, seed=0):
-    """PCA loading / cluster assignment の bootstrap 安定性"""
-    from sklearn.metrics import adjusted_rand_score
+import numpy as np
+from sklearn.base import clone
+from sklearn.utils import _safe_indexing
+
+def bootstrap_stability(estimator, X, measure, n_boot=50, seed=0):
+    """PCA loading / cluster assignment の bootstrap 安定性。
+
+    - estimator は毎回 clone して独立にフィット（同一インスタンスの使い回しは NG）
+    - X は pandas DataFrame でも安全にサンプリング（`.iloc[idx]` 相当）
+    - `measure(base, est_i, X_i)` は subspace 一致率 / ARI 等を返す user 関数
+    """
     rng = np.random.default_rng(seed)
-    base = estimator.fit(X)
+    base = clone(estimator).fit(X)
     scores = []
-    for i in range(n_boot):
-        idx = rng.integers(0, len(X), len(X))
-        est_i = estimator.fit(X[idx])
-        # PCA: 主成分 subspace 一致率 / Clustering: ARI
-        scores.append(measure(base, est_i))
-    return np.mean(scores)
+    n = len(X)
+    for _ in range(n_boot):
+        idx = rng.integers(0, n, n)
+        X_i = _safe_indexing(X, idx)          # DataFrame でも列選択にならない
+        est_i = clone(estimator).fit(X_i)     # 毎回 clone
+        scores.append(measure(base, est_i, X_i))
+    return float(np.mean(scores))
 ```
 
 ---
@@ -177,16 +194,29 @@ backend: pymc-nuts | numpyro-nuts-cpu | numpyro-nuts-gpu
 ```python
 import pymc as pm
 with pm.Model() as m:
+    # Skill 再利用のため入力は pm.Data で登録（Ch10 §10.6）
+    x_data = pm.Data("x_data", x_obs, mutable=True)
+    y_data = pm.Data("y_data", y_obs, mutable=True)
+
     beta = pm.Normal("beta", 0.0, 5.0)
     alpha = pm.Normal("alpha", 0.0, 5.0)
     sigma = pm.HalfNormal("sigma", 1.0)
-    mu = alpha + beta * x_obs
-    pm.Normal("y", mu=mu, sigma=sigma, observed=y_obs)
-    idata = pm.sample(draws=2000, tune=2000, chains=4, cores=4,
-                      nuts_sampler="numpyro", random_seed=42,
-                      target_accept=0.95)
-    idata.extend(pm.sample_prior_predictive(random_seed=42))
+    mu = alpha + beta * x_data
+    pm.Normal("y", mu=mu, sigma=sigma, observed=y_data)
+
+    # (1) prior predictive を fit の前に実施（Ch10 §10.3）
+    idata = pm.sample_prior_predictive(random_seed=42)
+
+    # (2) 事後サンプリング
+    idata.extend(pm.sample(draws=2000, tune=2000, chains=4, cores=4,
+                           nuts_sampler="numpyro", random_seed=42,
+                           target_accept=0.95))
+
+    # (3) 事後予測（学習データ）
     idata.extend(pm.sample_posterior_predictive(idata, random_seed=42))
+
+# 予測時は `pm.set_data({"x_data": x_new}, predictions=True)` 後に
+# `pm.sample_posterior_predictive(idata, predictions=True)` を使う（Ch10 §10.6）
 ```
 
 ### A.4.3 診断関数（第12章 §12.9）
@@ -244,13 +274,18 @@ with pm.Model(coords=coords) as m_h:
     sigma_lot = pm.HalfNormal("sigma_lot", 1.0)
     sigma_y = pm.HalfNormal("sigma_y", 1.0)
 
-    # sum-to-zero via ZeroSumNormal（PyMC 5.7+）
-    lab_eff = pm.ZeroSumNormal("lab_eff", sigma=sigma_lab, dims="lab")
-    inst_eff = pm.ZeroSumNormal("inst_eff", sigma=sigma_inst, dims="inst")
-
-    # non-centered lot effect（ZeroSumNormal 不要な階層）
+    # 全レベルとも非中心化（raw を Normal(0,1) で置き、sigma を Deterministic で掛ける）
+    # sum-to-zero は raw から平均を引いて Deterministic 化する（Ch11 §11.3 / Ch13）
+    lab_raw = pm.Normal("lab_raw", 0.0, 1.0, dims="lab")
+    inst_raw = pm.Normal("inst_raw", 0.0, 1.0, dims="inst")
     lot_raw = pm.Normal("lot_raw", 0.0, 1.0, dims="lot")
-    lot_eff = pm.Deterministic("lot_eff", lot_raw * sigma_lot, dims="lot")
+
+    lab_eff = pm.Deterministic(
+        "lab_eff", sigma_lab * (lab_raw - lab_raw.mean()), dims="lab")
+    inst_eff = pm.Deterministic(
+        "inst_eff", sigma_inst * (inst_raw - inst_raw.mean()), dims="inst")
+    lot_eff = pm.Deterministic(
+        "lot_eff", sigma_lot * lot_raw, dims="lot")  # lot は sum-to-zero 不要
 
     mu = (mu_grand + lab_eff[lab_idx] + inst_eff[inst_idx]
           + lot_eff[lot_idx])
@@ -258,6 +293,10 @@ with pm.Model(coords=coords) as m_h:
 
     idata = pm.sample(draws=2000, tune=2000, chains=4,
                       nuts_sampler="numpyro", target_accept=0.95,
+                      random_seed=0)
+```
+
+> **`pm.ZeroSumNormal` は？**：sum-to-zero は満たすが「非中心化」の raw パラメータ化とは別概念。Ch11/Ch13 の非中心化必須条件を満たすには上記のように raw + Deterministic の形にする。
                       random_seed=0)
 ```
 
@@ -280,16 +319,28 @@ layer_2:
   inputs:
     y_pred_raw: layer_1.outputs.y_pred_raw
     y_pred_sha256: layer_1.outputs.y_pred_sha256   # verify chain
+    upstream_layer: layer_1
   outputs:
     y_pred_calib: DataFrame(n, 3)   # mean, lower95, upper95
     y_pred_calib_sha256: <hash>
 layer_3:
+  # 合成階層データを使うため、実データ上流には接続しない（Ch13 §13.5）
   skill_id: pymc_hierarchical_v1
-  inputs:
-    y_pred_calib_sha256: layer_2.outputs.y_pred_calib_sha256
+  data_source: synthetic
+  synthetic_dataset:
+    generator_script: scripts/gen_synthetic_hierarchy.py
+    generator_script_sha256: <hash>
+    seed: 0
+    true_params:
+      sigma_lab: 0.5
+      sigma_inst: 0.3
+      sigma_lot: 0.2
+  # inputs.upstream_layer は無し（Ch13 の verify で明示的にチェック）
   outputs:
     variance_decomposition: {sigma_lab, sigma_inst, sigma_lot}
 ```
+
+> **Layer 3 に upstream を書かない**：Ch13 §13.5 で「Layer 3 は合成データを使うため実データ上流には接続しない」と定めているため、`inputs.upstream_layer` を書くと検証（`assert "upstream_layer" not in p3["inputs"]`）で落ちる。Layer 3 の再現性は `synthetic_dataset.generator_script_sha256` で担保する。
 
 ### A.6.2 chain 検証（第13章 §13.6）
 
@@ -321,9 +372,19 @@ skill_id: <namespace_snake_case>       # ★
 skill_version: <SemVer>                # ★
 code_sha256: <64 hex>                  # ★（Skill dir tree hash）
 git_commit_sha: <40 hex>               # ★
+execution_context: development | production  # ★ Ch14 §14.8
 
-input_sha256: <64 hex>                 # ★（データ）
-data_contract_hash: <64 hex>           # ★（契約定義）
+# ---------- 入力・出力（★） ----------
+inputs:                                # ★
+  X_sha256: <64 hex>
+  y_sha256: <64 hex>
+  data_contract_hash: <64 hex>
+  feature_columns: [f1, f2, ...]       # ★ Ch5, Ch7
+  target_column: y                     # ★
+output_artifacts:                      # ★
+  model_path: artifacts/model_v1.pkl
+  model_sha256: <64 hex>
+
 package_versions:                      # ★
   python: 3.11.7
   sklearn: 1.9.0
@@ -342,6 +403,10 @@ data_split:
   group_key: inst_id | lot_id | sample_id | null
   split_manifest_hash: <64 hex>        # ★ Ch7
   split_unit: {sample|lot|instrument|patient|none}
+  # 3-way split の場合（Ch13 capstone）
+  train_sha256: <64 hex>
+  calib_sha256: <64 hex>
+  test_sha256: <64 hex>
 
 cv_scheme:                             # ★ Ch7
   outer: {type: GroupKFold, n_splits: 5, group_key: inst_id}
@@ -358,6 +423,17 @@ model_config:
     y_range: [0, 10]
     inst_count_min: 3                  # 階層モデル用
     lot_count_min: 5
+
+metric_definition:                     # ★ Ch5, Ch7
+  primary: neg_root_mean_squared_error
+  secondary: [r2, mae]
+  cv_score:                            # ★ 学習/CV スコアの双方を必ず記録
+    neg_rmse_mean: -0.42
+    neg_rmse_std: 0.05
+    r2_mean: 0.81
+  training_score:
+    neg_rmse: -0.35
+    r2: 0.87
 
 hyperparam_search:                     # ○ nested CV の場合
   n_trials: 20
@@ -380,7 +456,12 @@ backend_config:
   jax_enable_x64: true
   jax_platform: cpu | gpu
   hardware: <CPU/GPU model>
-  cross_backend_tested: true           # ★ Ch14 §14.7
+
+backend_reproducibility:               # ★ Ch10 §10.9 / Ch14 §14.7
+  cross_backend_tested: true
+  tolerance_rhat_delta: 0.01
+  tolerance_ess_ratio: 0.9
+  reference_backend: pymc-nuts
 
 prior_specification:
   beta: {dist: Normal, mu: 0, sigma: 5}
@@ -395,15 +476,26 @@ prior_specification:
 prior_predictive_range:                # ★ Ch10 §10.3
   y_95ci: [-2.5, 2.5]
 
-diagnostics_summary:                   # ★ Ch12 §12.9
+uncertainty_scheme:                    # ★ Ch10, Ch12
+  type: posterior_predictive_95ci | conformal_prediction | bootstrap
+  coverage_target: 0.95
+  measured_coverage: 0.94
+
+diagnostics_summary:                   # ★ Ch12 §12.9（項目名は check_diagnostics() の出力に統一）
   diagnostics_pass: true
-  rhat_max: 1.005
-  ess_bulk_min: 850
-  ess_tail_min: 720
+  max_rhat: 1.005
+  min_ess_bulk: 850
+  min_ess_tail: 720
   n_divergences: 0
-  bfmi_min: 0.5
-  treedepth_max: 8
-  reached_max_treedepth_pct: 0.0
+  min_bfmi: 0.5
+  max_tree_depth: 8
+  reached_max_treedepth: false
+  thresholds:                          # 使用した閾値も記録
+    rhat: 1.01
+    ess_bulk: 400
+    ess_tail: 400
+    divergences: 0
+    bfmi: 0.3
 
 posterior_predictive_check:            # ★ Ch12 §12.5
   bpv_pass: true
@@ -423,15 +515,26 @@ hierarchical_structure:
   sum_to_zero: [lab_eff, inst_eff]
   applicability_domain:
     inst_count: 9
+  identifiability_check:               # ★ Ch11
+    passed: true
+    method: prior_vs_posterior_ratio
+  shrinkage_summary:                   # ○ Ch11
+    lab_shrinkage: 0.72
+    inst_shrinkage: 0.55
 
 # ---------- Multi-layer chain（Ch13） ----------
-upstream_run_ids: [<UUIDv7>, ...]      # ○（Layer 2+ のみ）
+upstream_run_ids: [<UUIDv7>, ...]      # ○（実データ上流を持つ Layer のみ）
 input_hashes: {y_pred_raw: <sha256>, ...}
 output_hashes: {y_pred_calib: <sha256>, ...}
 
 # ---------- 監査・失敗管理（Ch14-15） ----------
 data_source: real | synthetic          # ★ Ch14 §14.8
-synthetic_production_override:         # data_source=synthetic 時のみ必須
+synthetic_dataset:                     # data_source=synthetic のとき必須
+  generator_script: scripts/gen_synthetic_hierarchy.py
+  generator_script_sha256: <64 hex>
+  seed: 0
+  true_params: {sigma_lab: 0.5, ...}   # 合成データなので既知
+synthetic_production_override:         # data_source=synthetic かつ execution_context=production のときのみ必須
   approved_by: <ORCID>
   justification: <text>
 
@@ -455,6 +558,25 @@ integrity:
 access_policy_id: <ID>
 retention_policy_id: <ID>
 ```
+
+### A.7.1 task_type 別 必須項目マトリクス
+
+| フィールド | supervised | unsupervised | Bayesian | hierarchical | capstone |
+|---|:-:|:-:|:-:|:-:|:-:|
+| `inputs.feature_columns`, `target_column` | ★ | ★（target 除く） | ★ | ★ | ★ |
+| `data_split.split_manifest_hash` | ★ | ○ | ★ | ★ | ★（train/calib/test 全て）|
+| `cv_scheme` | ★ | ○ | ○ | ○ | ★ |
+| `model_config.applicability_domain` | ★ | ★ | ★ | ★（inst/lot_count_min）| ★ |
+| `metric_definition.cv_score` | ★ | ★（内部指標）| ○ | ○ | ★ |
+| `sampler_config`, `backend_config` | — | — | ★ | ★ | ★（Layer 2/3）|
+| `backend_reproducibility` | — | — | ★ | ★ | ★ |
+| `prior_specification`, `prior_predictive_range` | — | — | ★ | ★ | ★（Layer 2/3）|
+| `diagnostics_summary` | — | — | ★ | ★ | ★（Layer 2/3）|
+| `posterior_predictive_check` | — | — | ★ | ★ | ★（Layer 2/3）|
+| `hierarchical_structure` | — | — | — | ★ | ★（Layer 3）|
+| `data_source`, `synthetic_dataset` | — | — | ○ | ○ | ★（Layer 3 は synthetic）|
+| `upstream_run_ids`, `input_hashes` | — | — | — | — | ★（Layer 2、Layer 3 は除外）|
+| `known_issues_snapshot_hash` | ★ | ★ | ★ | ★ | ★ |
 
 ---
 

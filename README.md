@@ -20,7 +20,7 @@ AI Agent と MCP（Model Context Protocol）を用いて、実験データの分
 
 ## 🗂 目次
 
-**➡︎ 完全な目次と各章へのリンクは [papers/index.md](papers/index.md) を参照してください。**
+**➡︎ 完全な目次と各章へのリンクは [papers/vol-01/index.md](papers/vol-01/index.md) を参照してください。**
 
 ### 第Ⅰ部　なぜ必要か・何を作るか
 - 第1章 なぜ今「AI エージェント時代のデータ分析」なのか
@@ -62,11 +62,12 @@ AI Agent と MCP（Model Context Protocol）を用いて、実験データの分
 agentic-data-analysis-cookbook/
 ├── README.md               # 本ファイル
 ├── manifest.yaml           # プロジェクト管理マニフェスト
-├── papers/                # 本編・付録の Markdown 原稿
-│   ├── index.md            # 全 15 章 + 付録の目次
-│   ├── chapter-outline.md  # 執筆計画・章別責務分離
-│   ├── chapter-01.md 〜 chapter-15.md
-│   └── appendix-*.md       # 付録（執筆予定）
+├── papers/                 # シリーズ全体の原稿置き場
+│   └── vol-01/             # 第1巻「AIエージェント時代のデータ分析入門」
+│       ├── index.md            # 全 15 章 + 付録の目次
+│       ├── chapter-outline.md  # 執筆計画・章別責務分離
+│       ├── chapter-01.md 〜 chapter-15.md
+│       └── appendix-a.md 〜 appendix-c.md
 ├── research/               # 執筆過程で収集した情報・引用ソース
 └── prompts/                # 執筆時のプロンプト履歴
 ```

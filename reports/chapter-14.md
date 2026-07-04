@@ -158,9 +158,10 @@ flowchart LR
 
 **②-A データ流出**：
 1. **データ分類ラベル**：全データに「公開可／社内限定／機密」のタグを付け、Skill が扱う前に確認
-2. **マスキング Skill を第8章のデータ契約に組み込む**：機密フィールドを ID・ハッシュに置換
-3. **AI 環境の学習除外契約**：Copilot Enterprise・Azure OpenAI 等の**学習除外オプション**を採用（詳細は第6章）
-4. **プロンプトに生データを貼らない**：ファイル読み込みを前提とし、必要な部分のみ Skill で加工
+2. **`agent_visible_metadata` / `private_provenance` の分離**（第8章 §8.11・第11章 §11.2・第13章 §13.9）：匿名化済み `sample_id`・装置カテゴリ・非機密条件のみを `agent_visible_metadata` に含める。raw 絶対パス・課題番号・共同研究先名・装置PCアカウント・未公開プロセス条件は `private_provenance` に隔離し、Agent 可視の出力・チャット応答・共有ログには載せない
+3. **マスキング Skill を第8章のデータ契約に組み込む**：機密フィールドを ID・ハッシュに置換
+4. **AI 環境の学習除外契約**：Copilot Enterprise・Azure OpenAI 等の**学習除外オプション**を採用（詳細は第6章）
+5. **プロンプトに生データを貼らない**：ファイル読み込みを前提とし、必要な部分のみ Skill で加工
 
 **②-B 評価リーク**：
 1. **サンプル ID・バッチ ID・測定日**を分割キーに使う（GroupKFold / TimeSeriesSplit）
@@ -225,7 +226,7 @@ flowchart LR
 | スペクトル型 | ピーク位置の物質・振動モード帰属 | 第9章⑤禁止事項＋標準試料実測 |
 | 時系列型 | イベント種別（分解・脱水など）の推定 | 第13章 §13.3：event_label は metadata 転記のみ |
 | 画像型 | 粒径・空隙率の "本材料の典型値" 主張 | 第12章物理レンジ＋別ツール比較 |
-| 回折型 | ピーク帰属の相同定 | 第13章 §13.5：単結晶 Scherrer 禁止・派生量は method 明示 |
+| 回折型 | ピーク帰属・相同定・Rietveld 自動組成/相確定 | 第13章 §13.5：相同定・空間群/組成推定・Rietveld 自動解析/自動相確定禁止＋派生量 method 明示 |
 | 表形式型 | "この変数が原因" 因果断定 | 第13章 §13.6：associative_screening のみ・"重要度" 禁止 |
 | マルチモーダル | 統合結果の "総合的に妥当" 判断 | 第11章③ discussion 中の帰属禁止＋人間判定 |
 
@@ -256,7 +257,7 @@ flowchart LR
 
 ### 症状
 
-- Skill 出力に `provenance` フィールドがない、または `skill_version` のみで**パッケージ・乱数種・環境**が記録されていない
+- Skill 出力に `provenance` フィールドがない、または `skill_version` のみで**`input_sha256`・パッケージ・乱数種・環境**が記録されていない
 - 「なぜかこの前と結果が違う」報告
 - Skill の呼び出しプロンプトが**フリーフォーム**で、パラメータが AI に選ばせる設計になっている
 
@@ -271,7 +272,7 @@ flowchart LR
 
 | Step | 確認 | Fail 条件 |
 |:---:|---|---|
-| 1 | Skill 出力の `provenance` に **skill_version・package_versions・run_datetime_utc** が揃っているか | 一つでも欠落 |
+| 1 | Skill 出力の `provenance` に **input_sha256・skill_version・package_versions・run_datetime_utc**（マルチモーダルは加えて `modality_inputs`）が揃っているか | 一つでも欠落 |
 | 2 | 使用パッケージが**厳密バージョン**（`==`）で pin されているか | 範囲指定・未指定 |
 | 3 | 確率的アルゴリズムに**乱数種**が渡され、provenance に記録されているか | seed 記録なし |
 | 4 | Skill のパラメータが**入力 metadata や `references/` の設定ファイル**で確定しているか（AI 推論に任せていないか） | AI が動的に決めている |
@@ -279,7 +280,7 @@ flowchart LR
 
 ### 再発防止
 
-1. **Skill テンプレート（第13章）の⑥再現性条件を必ず埋める**：skill_version・package_versions・run_datetime_utc・乱数種
+1. **Skill テンプレート（第13章）の⑥再現性条件を必ず埋める**：`provenance.input_sha256`・skill_version・package_versions・run_datetime_utc・乱数種（マルチモーダルは `modality_inputs` も）
 2. **`requirements.txt` は `==` で pin**：`pip freeze` の結果をそのまま使う
 3. **パラメータは入力 metadata に落とす**：AI に選ばせず、`references/params.yaml` 等で明示
 4. **確率的アルゴリズムは `random_state` 必須引数化**：Skill 引数として受け付ける
@@ -325,11 +326,11 @@ flowchart LR
 
 - [ ] **Q1** 検証者と分析者が別ステップ・別ノートブックに分かれているか（循環設計）
 - [ ] **Q2** 独立参照点（手計算／別ツール／実測標準）の**最低 1 層**が実行済みか（循環設計）
-- [ ] **Q3** データに公開可／社内限定／機密の**分類ラベル**が付いているか（データ流出）
+- [ ] **Q3** データに公開可／社内限定／機密の**分類ラベル**が付き、`agent_visible_metadata` と `private_provenance` を分離しているか（データ流出）
 - [ ] **Q4** 分割単位が**サンプル ID・バッチ ID・時刻**で意味を持つか（評価リーク）
 - [ ] **Q5** レポート中の**引用 DOI/arXiv ID**が MCP 照合済みか（ハルシネーション）
 - [ ] **Q6** 出力の**主要数値**が第12章 RANGES または自装置レンジ内か（ハルシネーション）
-- [ ] **Q7** Skill 出力の `provenance` に **skill_version・package_versions・run_datetime_utc** が揃うか（再現性）
+- [ ] **Q7** Skill 出力の `provenance` に **input_sha256・skill_version・package_versions・run_datetime_utc**（マルチモーダルは加えて `modality_inputs`）が揃うか（再現性）
 - [ ] **Q8** Skill パラメータが AI 推論ではなく **metadata / 設定ファイル**で確定しているか（再現性）
 
 **Q1〜Q8 のいずれかが FAIL の場合**、対応する完全版セクション（§14.7 の該当群）へ進んでください。
@@ -348,7 +349,7 @@ flowchart LR
 
 #### データ流出・評価リーク（5 項目）
 
-- [ ] **⑥** 全データに公開可／社内限定／機密の**分類ラベル**が付いているか（②-A）
+- [ ] **⑥** 全データに公開可／社内限定／機密の**分類ラベル**が付いており、匿名化済み `sample_id` のみを `agent_visible_metadata` に載せ、raw 絶対パス・課題番号・共同研究先名・装置PCアカウント等は `private_provenance` に隔離してあるか（②-A・第8/11/13章）
 - [ ] **⑦** 使用中の AI 環境が**学習除外契約**下にあるか、または機密データを渡していないか（②-A）
 - [ ] **⑧** 生データを AI チャットに**貼り付けていない**か（ファイル読み込みで処理しているか）（②-A）
 - [ ] **⑨** 訓練・テスト分割が**サンプル ID・バッチ ID・時刻**で意味を持つか（行単位ランダム分割になっていないか）（②-B）
@@ -359,19 +360,19 @@ flowchart LR
 - [ ] **⑪** レポート中の全ての引用に**トレース先**（Skill 出力ファイル・DOI 等）があるか
 - [ ] **⑫** 文献 DOI/arXiv ID は**第10章の validate_output.py と MCP**で照合済みか
 - [ ] **⑬** 出力スキーマ上の**主要数値**が第12章の**物理的妥当性 RANGES 定義済みキー**についてレンジ内であり、**未定義キー**は自装置用レンジを追加してあるか
-- [ ] **⑭** 帰属・同定を含む文が Skill の**構造化出力**（チャット応答ではない）由来か
-- [ ] **⑮** Skill の⑤禁止事項（第9〜11章）が、**次のいずれか**で機械的／運用的に検査されているか：(a) 出力スキーマの enum / 型制約、(b) `validate_output.py` 等の禁止語・パターン検査、(c) レビューでの目視確認。（完全な JSON Schema 強制は難しいので、a〜c の**組み合わせ**を推奨）
+- [ ] **⑭** 帰属・同定・因果断定を含む文が Skill 出力・Notebook・Markdown レポート・Agent チャット応答の**いずれにも含まれていない**か（第9〜11章・第15章 `common_forbidden.yaml` の禁止事項に完全準拠）
+- [ ] **⑮** Skill の⑤禁止事項が、**locked forbidden set（物質同定・ピーク帰属・相同定 / phase identification・Rietveld による自動解析/自動定量/自動組成/相確定）** について、**次のいずれか**で機械的／運用的に検査されているか：(a) 出力スキーマの enum / 型制約、(b) `validate_output.py` 等の禁止語・パターン検査、(c) レビューでの目視確認。（完全な JSON Schema 強制は難しいので、a〜c の**組み合わせ**を推奨）
 
 #### 再現性欠如（5 項目）
 
-- [ ] **⑯** Skill 出力の `provenance` に **skill_version・package_versions・run_datetime_utc**が揃っているか
+- [ ] **⑯** Skill 出力の `provenance` に **`input_sha256`・`skill_version`・`run_datetime_utc`・`package_versions`** が揃っているか（乱数使用時は `random_seed` も）。**マルチモーダルの場合は `provenance.modality_inputs`（各モダリティの `input_sha256` + `skill_version` 連鎖・第11章）も必須**
 - [ ] **⑰** `requirements.txt` が**厳密バージョン**（`==`）で pin されているか
 - [ ] **⑱** 確率的アルゴリズムの**乱数種**が Skill 引数として渡され、記録されているか
 - [ ] **⑲** Skill パラメータが **AI 推論ではなく metadata / 設定ファイル**で確定しているか
 - [ ] **⑳** 同一入力で 2 回連続実行して**bit-exact 一致**するか（CI 等で確認）
 
 > [!TIP]
-> このチェックリストは Skill プロジェクトの `README.md` の「セルフレビュー」節に貼って運用してください。第12章 15 項目と併せて計 35 項目のセルフレビューで、本書の合格ラインを超えます。
+> このチェックリストは Skill プロジェクトの `README.md` の「セルフレビュー」節に貼って運用してください。第12章 15 項目と併せて計 35 項目のセルフレビューで、本書の**合格ライン「動く・検証済み・再現できる」の 3 拍子**を確認できます（「失敗しない」ことを保証するものではありません）。
 
 ---
 
@@ -501,9 +502,12 @@ Step 2: ... → PASS / FAIL
 
 ## 参考資料
 
-- [脚注1] 循環設計問題（AI に "評価" と "生成" の両方を任せる危険性）についての先行議論は、第7章の設計時評価仕様の節を参照。本章は事後診断の観点で補完する。
-- [脚注2] 評価漏洩（data leakage）の基本文献：Kaufman, S., Rosset, S., & Perlich, C. (2011). "Leakage in Data Mining: Formulation, Detection, and Avoidance." KDD 2011. 本書では pandas/scikit-learn Pipeline を通じた実装レベルの対処に焦点を当てる。
-- [脚注3] ハルシネーション対策の外部依存部分は第10章（MCP による文献 DOI/arXiv 照合）、装置固有部分は第13章（テンプレートの⑤禁止事項）を参照。
-- [脚注4] 再現性の技術的側面（package pin・乱数種・provenance）については、Reproducibility in Data Science に関する各種 checklist（例：ML Reproducibility Checklist）が参考になる。本書は装置分析文脈に合わせて設計時条件（第7章⑥⑧）と実行後検証（第12章）に橋渡しする立場をとる。
-- 本章の失敗チェックリスト 20 項目は、第12章の 15 項目と併せて Skill プロジェクトの `README.md` に貼付して運用することを推奨。
-- 組織運用・監査・責任分担は第15章（終章）で扱う。
+- [脚注1] [第7章「Skillの設計原則」（設計時評価仕様）](./chapter-07.md) - 循環設計問題（AI に "評価" と "生成" の両方を任せる危険性）の先行議論。本章は事後診断の観点で補完する
+- [脚注2] [Leakage in Data Mining: Formulation, Detection, and Avoidance](https://doi.org/10.1145/2020408.2020496) - 評価漏洩（data leakage）の基本文献。Kaufman, S., Rosset, S., & Perlich, C. (2011), KDD 2011. 本書では pandas/scikit-learn Pipeline を通じた実装レベルの対処に焦点を当てる
+- [脚注3] [第10章「文献照合フロー」](./chapter-10.md) / [第13章「装置カテゴリ別テンプレート」](./chapter-13.md) - ハルシネーション対策の外部依存部分は第10章（MCP による文献 DOI/arXiv 照合）、装置固有部分は第13章（テンプレートの⑤禁止事項）を参照
+- [脚注4] [The Machine Learning Reproducibility Checklist](https://www.cs.mcgill.ca/~jpineau/ReproducibilityChecklist.pdf) - 再現性の技術的側面（package pin・乱数種・provenance）の外部参考文献。本書は装置分析文脈に合わせて設計時条件（第7章⑥⑧）と実行後検証（第12章）に橋渡しする立場をとる
+
+### 関連章
+
+- 本章の失敗チェックリスト 20 項目は、第12章の 15 項目と併せて Skill プロジェクトの `README.md` に貼付して運用することを推奨
+- 組織運用・監査・責任分担は第15章（終章）で扱う

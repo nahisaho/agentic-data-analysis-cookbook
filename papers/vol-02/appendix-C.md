@@ -36,19 +36,24 @@
 ### C.2.2 対処フローチャート
 
 ```
-Step 1: target_accept を 0.99 に上げる
+Step 1: 発散点を localize（az.plot_pair で高曲率領域を確認）
+  └─ 単純に「深いスケール差」の場合 →
+Step 2: 特徴量・ターゲットの標準化 / スケール見直し
   ├─ 改善 → OK
   └─ 未改善 →
-Step 2: パラメータの非中心化 (Centered → Non-centered)
+Step 3: パラメータの非中心化 (Centered → Non-centered)
   ├─ 改善 → OK
   └─ 未改善 →
-Step 3: prior の見直し
+Step 4: prior の見直し
   ├─ 広すぎる → 弱情報 prior に絞る
   ├─ 狭すぎる → データが動かせるように広げる
   └─ 数値不安定な尺度 → 標準化前提の prior に変更
-Step 4: モデル簡素化（階層を減らす、相関を落とす）
-Step 5: バックエンド変更（NumPyro CPU → NutPie など）
+Step 5: モデル簡素化（階層を減らす、相関を落とす）
+Step 6: 最終手段として target_accept を 0.99 に上げる
+Step 7: バックエンド変更（NumPyro CPU → NutPie など）
 ```
+
+> **`target_accept=0.99` を最初にやらない**：Ch12 §12.6 の梯子どおり **原因の localize → 標準化 → 非中心化** を先に潰す。`target_accept` を先に上げると根本原因（曲率・スケール・パラメータ化）が隠れ、認定 provenance に「発散 0 だが `target_accept=0.99` に依存」の脆いモデルが残る。
 
 ### C.2.3 divergences 対処例
 
@@ -151,17 +156,38 @@ sizes, train_s, test_s = learning_curve(
 ### C.5.2 リーク検知テスト（Ch14 §14.10 #1）
 
 ```python
-def audit_leakage(pipe_correct, pipe_leaky, X, y, cv, groups=None):
-    """Pipeline 内 fit と外 fit の CV スコアを比較"""
-    s1 = cross_val_score(pipe_correct, X, y, cv=cv, groups=groups,
-                         scoring="r2").mean()
-    s2 = cross_val_score(pipe_leaky, X, y, cv=cv, groups=groups,
-                         scoring="r2").mean()
-    diff = abs(s1 - s2)
-    if diff > 0.05:
-        raise AssertionError(f"leakage suspected: |Δr2|={diff:.3f}")
-    return {"pipe_r2": s1, "leaky_r2": s2, "diff": diff}
+from sklearn.base import clone
+from sklearn.model_selection import cross_val_score
+
+def audit_scaler_leakage(model, preprocess, X, y, cv, groups=None,
+                        threshold=0.05):
+    """"Pipeline 内 fit"（正）と "全体で fit 済み特徴量に対する model 単体 CV"（漏洩）
+    を比較するスモークテスト。
+
+    - `preprocess` は Scaler / feature selector 等（`fit_transform` を持つ）
+    - 「漏洩ケース」は前処理を CV の外で全データにフィットしてしまう典型ミスを再現
+    - スコアが「漏洩ケースで有意に高い」なら要調査（下振れは検知対象外）
+    """
+    from sklearn.pipeline import Pipeline
+    pipe_correct = Pipeline([("prep", clone(preprocess)),
+                             ("model", clone(model))])
+    # 漏洩再現：前処理を X 全体でフィットしてから model 単体を CV
+    X_leaked = clone(preprocess).fit_transform(X, y)
+
+    s_correct = cross_val_score(pipe_correct, X, y, cv=cv, groups=groups,
+                                scoring="r2").mean()
+    s_leaked = cross_val_score(clone(model), X_leaked, y, cv=cv, groups=groups,
+                               scoring="r2").mean()
+
+    diff = s_leaked - s_correct   # 向きで判定（漏洩は「上振れ」）
+    if diff > threshold:
+        raise AssertionError(
+            f"leakage suspected: leaked r2 - correct r2 = {diff:+.3f} "
+            f"(> {threshold}). preprocess を Pipeline に入れているか確認。")
+    return {"correct_r2": s_correct, "leaked_r2": s_leaked, "signed_diff": diff}
 ```
+
+> **注意（スモークテスト）**：これは「Scaler を CV 外で fit する」典型パターンの再現テストで、あらゆるリーク（target encoding, 特徴量選択, 時系列の未来参照 等）を検知できるわけではない。個別のリークパターンには **Ch14 §14.2** の該当項目のテストを追加すること。判定は `abs()` ではなく **符号付き**（漏洩ケースが有意に良い＝上振れのみ検知）にする。
 
 ---
 
@@ -200,7 +226,7 @@ print("x64 enabled:", jax.config.jax_enable_x64)
 | `Cannot mix jax and numpy arrays` | 型混在 | `jnp.asarray()` で統一 |
 | GPU 認識されない | CUDA 環境未対応の `jaxlib` | `pip install "jax[cuda12]"` |
 | `An NVIDIA GPU may be present ... jaxlib is not installed. Falling back to cpu.` | GPU jaxlib 未インストール | CPU で OK / 必要なら CUDA 版インストール |
-| メモリ不足（GPU） | chain 全並列で VRAM 消費 | `chains=2, cores=1` に落として並列化を CPU に |
+| メモリ不足（GPU） | chain 全並列で VRAM 消費 | chain 数を減らす（`chains=2`）／CPU バックエンドに固定（`nuts_sampler="pymc"` or `chain_method="sequential"`）／NumPyro/JAX の `chain_method`・`postprocessing_backend` を確認 |
 
 ### C.7.3 バックエンド差の許容範囲（第10章 §10.9）
 
@@ -213,13 +239,19 @@ print("x64 enabled:", jax.config.jax_enable_x64)
 
 ### C.7.4 arviz バージョン互換性
 
-| PyMC | 互換 arviz |
-|---|---|
-| 5.28+ | 0.23+ |
-| 5.19 | 0.20 系（`az.concat` あり） |
-| 5.10 以下 | 0.15 以下 |
+**方針**：PyMC の公式インストールメタデータが解決するバージョンを使う（`pip install pymc` に任せる）。CI・執筆再現のため lockfile（`requirements.txt` / `uv.lock` / `poetry.lock`）に固定する。
 
-**注意**：arviz 1.0+ で `az.concat` 削除、PyMC 5.19 との組み合わせで壊れる。**venv で pin** を推奨。
+**参考（本書検証環境）**：
+
+| 環境 | pymc | arviz | 備考 |
+|---|---|---|---|
+| 本書検証時 | 5.28.5 | 0.23.4 | `numpyro 0.21`, `jax 0.10` と併用 |
+| 過渡期の pin 例 | 5.19.x | `arviz<1.0` | 本書コードが `az.concat` を使う場合の互換 pin |
+
+**注意**：
+- PyMC 5.x の依存宣言はおおむね `arviz>=0.13`。書籍のバージョン対応表を「厳密な必須ペア」として受け取らない
+- arviz 1.0+ で API 変更あり（`az.concat` 削除等）。本書の付録・章のコードで該当 API を使う場合のみ **`arviz<1.0` を pin**
+- 環境問題を「PyMC↔ArviZ バージョン非互換」と即断せず、まず本書の lockfile どおりに再構築してから切り分ける
 
 ---
 
@@ -231,45 +263,53 @@ print("x64 enabled:", jax.config.jax_enable_x64)
 
 | 名称 | 階層構造 | ライセンス | サイズ | 用途適合度 |
 |---|---|---|---|---|
-| Materials Project Round-Robin | 装置間・研究室間 | 個別 | 小-中 | ◎（第11章向け） |
-| NIST SRD（Standard Reference Data） | 標準試料 × 装置 | Public Domain | 大 | ◎ |
-| NOMAD Repository | 計算ラボ × 手法 | CC BY | 巨大 | ◯（計算 vs 実験） |
+| Materials Project 経由（MPContribs / 論文 supplementary） | 装置間・研究室間（該当データセットに依存） | 個別（要確認） | 小-中 | △〜◎（該当データセット確認要） |
+| NIST SRD（Standard Reference Data） | 認証値・不確かさ（raw 階層は SRD 製品による）| Public Domain（一部有償・要ライセンス） | 大 | ◎（Bayesian 校正）／raw 階層は要確認 |
+| NOMAD Repository | 計算ラボ × 手法 | メタデータ CC BY / 個別 DS は別 | 巨大 | ◯（計算 vs 実験） |
 | RRUFF Raman | 試料 × 装置 | 教育研究用 | 中 | ◯（第13章 Layer 1-2） |
-| MatBench | 単一データセット | CC BY | 中 | ×（階層構造なし） |
+| MatBench | 単一データセット | CC BY（原データ別） | 中 | ×（階層構造なし・校正の認証値でもない） |
 | ChemBench | 化学 benchmarks | 個別 | 中 | △ |
 | PDB (Protein Data Bank) | 装置 × 手法 | Public Domain | 巨大 | △（材料外） |
-| ARIM 公開データ | 装置 × 拠点 | CC BY-NC-SA 4.0 | 中 | ◎（本書想定） |
+| ARIM 公開データ | 装置 × 拠点 | 個別確認（本書合成データは CC BY-NC-SA 4.0）| 中 | ◎（本書想定） |
 
-### C.8.2 Materials Project Round-Robin
+### C.8.2 Materials Project 経由の階層データ
 
-**概要**：同一組成の材料を複数装置で測定した比較実験データ。装置間差・研究室間差の階層構造を含む。
+**概要**：Materials Project (MP) は主に DFT 計算材料 DB。**「Round-Robin」という単一の公式データセット名は存在しない**ため、階層構造を扱う候補としては次を検討する:
 
-- **URL**：<https://materialsproject.org/> の Related Data セクション、または論文中に付随
-- **アクセス**：`mp-api` パッケージ経由（API key 必要）
-- **ライセンス**：**個別データセットごと**。CC BY-NC の場合が多い
+- **MPContribs 上の実験データセット**：外部研究者が投稿した実験データ。装置間比較・研究室間比較を含むものが存在
+- **論文 supplementary**：MP を参照する round-robin 実験（例: XRD, XPS）の supplementary CSV
+- **同一組成 × 複数計算手法**：MP 上の複数計算エントリを「手法階層」として扱う（実験差ではない点に注意）
+
+- **URL**：<https://materialsproject.org/>、<https://contribs.materialsproject.org/>
+- **アクセス**：`mp-api` パッケージ（`mpr.summary.search` は MP の要約ドキュメント検索。round-robin 系の階層データは通常 MPContribs や supplementary から個別取得）
+- **ライセンス**：**個別データセットごとに要確認**。MP コア DB は CC BY 4.0（一部改定履歴あり）、MPContribs は投稿元ライセンス依存
 - **入手方法**：
   ```python
   from mp_api.client import MPRester
   with MPRester(api_key="...") as mpr:
+      # 例: DFT 計算エントリの検索。実験 round-robin データは
+      # MPContribs / 論文 supplementary から個別取得する
       docs = mpr.summary.search(...)
   ```
-- **本書での用途**：第11章 §11.4 の装置効果モデル、第13章 Layer 3 の階層モデル
+- **本書での用途**：第11章 §11.4 の装置効果モデル、第13章 Layer 3 の階層モデル（**要出典確認**）
 - **注意点**：
+  - `mpr.summary.search` は round-robin 実験データを直接返さない。**MPContribs / 論文 supplementary を明示的に指す**
   - 装置数（inst_count）が 3〜5 と少ない場合、`sigma_inst` の事後が prior に依存（Ch14 §14.5 パターン B）
   - **API key の取り扱い**：commit しない、`.env` で管理
 
 ### C.8.3 NIST SRD
 
-**概要**：米国標準技術研究所の Standard Reference Database。標準試料の物性値と測定条件のデータベース。
+**概要**：米国標準技術研究所の Standard Reference Database。標準試料の物性値・評価済みデータのデータベース。
 
 - **URL**：<https://www.nist.gov/srd>
-- **ライセンス**：Public Domain（一部要ライセンス）
+- **ライセンス**：Public Domain（一部要ライセンス、有償の SRD 製品もあり）
 - **主要 SRD**：
   - SRD 34: XPS Database
   - SRD 108: Ceramics WebBook
   - SRD 46: Critically Selected Stability Constants of Metal Complexes
-- **本書での用途**：Bayesian 校正の「真値」として利用
+- **本書での用途**：Bayesian 校正の「認証値」として利用
 - **注意点**：
+  - **SRD 全般が「標準試料 × 装置」の raw 階層データを提供するわけではない**。多くは評価済み・critically selected な参照 DB。装置階層を必要とする場合は個別 SRD 製品の raw / metadata 提供状況を確認する
   - **不確かさの定義**（Type A/B）を確認して MCMC 事後と対応させる
   - 一部は有償・登録要
 
@@ -302,12 +342,13 @@ print("x64 enabled:", jax.config.jax_enable_x64)
 **概要**：文部科学省 ARIM（Advanced Research Infrastructure for Materials and Nanotechnology）事業で公開される装置測定データ。
 
 - **URL**：<https://arim.nims.go.jp/> または各拠点の公開データポータル
-- **ライセンス**：**CC BY-NC-SA 4.0**（原則、個別に確認）
+- **ライセンス**：**個別データセットごとに一次確認する**（ARIM 全体で単一ライセンスとは限らない）
 - **入手**：拠点ごとの公開データセット、ARIM DX 事業のデータ基盤
 - **階層構造**：**装置（inst）× 拠点（facility）× 試料（sample）× ロット（lot）** の 4 階層
 - **本書での用途**：**第11章・第13章の第一候補**
 - **注意点**：
-  - **CC BY-NC**：**商用転用不可**（Skill を商用製品に組み込む場合は要注意）
+  - **本書の Ch02 §2.9 で CC BY-NC-SA 4.0 と明記しているのは、本書が同梱する「ARIM 風合成階層データ」のライセンス**であって、実 ARIM 公開データのライセンスとは別。実データを使う場合は該当データセット／ポータルの利用規約を必ず一次確認する
+  - もし実データが CC BY-NC 系の場合、Skill を商用製品に組み込む用途では利用不可
   - `arim_context.instrument_id`, `facility_id`, `sample_id`, `lot_id` を provenance に記録（Ch15 §15.5.3）
   - **拠点間で単位表記が異なる場合**：Ch4 のデータ契約で単位統一を必須化
 
@@ -315,17 +356,34 @@ print("x64 enabled:", jax.config.jax_enable_x64)
 
 ```
 Q1: 商用利用の可能性がある？
-  YES → NOMAD (CC BY) or MatBench (CC BY) or NIST (Public Domain)
+  YES → データセット単位でライセンス確認が必須:
+        - MatBench (CC BY) は候補（ただし個別データの原ライセンスも確認）
+        - NOMAD は「メタデータ CC BY、個別データセットのライセンスは別」なので per-dataset 確認
+        - NIST SRD は Public Domain の SRD 製品のみ（有償・要ライセンスの SRD もある）
   NO  →
 Q2: 装置間差・研究室間差の階層構造が主目的？
-  YES → Materials Project Round-Robin, ARIM 公開データ
+  YES → ARIM 公開データ、MPContribs 上の実験データ、論文 supplementary
   NO  →
-Q3: 標準試料の Bayesian 校正が主目的？
-  YES → NIST SRD, MatBench
+Q3: 認証値（reference value）による Bayesian 校正が主目的？
+  YES → NIST SRD / SRM 相当（不確かさ Type A/B が明記されているもの）
+        ※ MatBench は ML ベンチマーク用データセットで、校正の「認証値」ではない
   NO  →
 Q4: 教育・演習が主目的？
   → 本書の合成階層データを推奨（正解が既知、階層設計が明示的）
 ```
+
+### C.8.7a 実運用向け一次スクリーニング表
+
+| ゲート | 判定基準 |
+|---|---|
+| ライセンス | 用途（研究／商用／再配布）に対して明示的に許諾されている |
+| 階層キー | `inst_id` / `facility_id` / `lot_id` 等が **明示的に取得可能** |
+| Group 数 | `n_group ≥ Ch11 §11.4 の applicability domain 最小値`（例: `inst ≥ 3`）|
+| 不確かさ | 認証値・観測不確かさが提供されている（Bayesian 校正用途）|
+| 取得再現性 | API / 静的ダウンロードで **バージョン付き** に再取得できる |
+| Citation | 引用形式（DOI / BibTeX 等）が公開されている |
+
+**運用**：新規データを採用する際は、まずこのゲートを通過するかを確認してから Ch4 のデータ契約に進む。
 
 ### C.8.8 実データ利用時の共通チェック
 
@@ -341,13 +399,13 @@ Q4: 教育・演習が主目的？
 
 ## C.9 まとめ
 
-- **MCMC 未収束**：target_accept → 非中心化 → prior 見直し → モデル簡素化 → バックエンド変更
+- **MCMC 未収束**：発散点の localize → 標準化 → 非中心化 → prior 見直し → モデル簡素化 → 最終手段で `target_accept` → バックエンド変更
 - **警告地獄**：警告は根本対処。ミュートは監査ログに残す
-- **過学習・リーク**：Pipeline 内 fit、学習曲線、リーク検知 audit test
+- **過学習・リーク**：Pipeline 内 fit、学習曲線、リーク検知 audit（スモークテスト）
 - **NumPyro / JAX**：`jax_enable_x64=True` を **必ず** import 直後に
-- **arviz / pymc 互換性**：venv で pin
-- **実データ候補**：ARIM 公開データが第一候補、次点で Materials Project Round-Robin / NIST SRD
-- **商用転用**：CC BY-NC を避け、CC BY / Public Domain を選ぶ
+- **arviz / pymc 互換性**：厳密なペア表に頼らず lockfile で pin（本書コードが `az.concat` を使う場合のみ `arviz<1.0`）
+- **実データ候補**：ARIM 公開データを第一候補、次点で MPContribs / NIST SRD / RRUFF
+- **商用転用**：**すべてデータセット単位でライセンス一次確認**（「CC BY-NC を避ければ良い」ではなく個別確認が必須）
 - **すべての実データ利用は provenance に一次情報を記録**
 
 vol-02 本編と 3 付録はここで完結です。

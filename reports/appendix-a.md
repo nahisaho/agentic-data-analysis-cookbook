@@ -46,8 +46,14 @@ flowchart LR
 
 ### A.2.1 Skill ディレクトリ構造（progressive disclosure）
 
+配置先は用途で 2 系統あります（第4・7章）。本付録の例は **ローカル下書き用の `skills/`** で示しますが、実運用では以下のいずれかに配置してください。
+
+- **リポジトリ配布**: `.github/skills/<name>/`（Copilot CLI がリポジトリを開いたときに自動検出）
+- **個人利用**: `~/.copilot/skills/<name>/`（複数プロジェクトから共通利用）
+- **下書き**: `skills/<name>/`（本付録の説明用。完成後に上のいずれかへ移す）
+
 ```
-skills/
+skills/                                ← 下書き用（配置先は上記を参照）
 └── my-first-analysis-skill/           ← Skill 名（ケバブケース）
     ├── SKILL.md                       ← ①エントリポイント（必須／〜300行以内）
     ├── references/                    ← ②詳細ドキュメント（必要時のみ読み込み）
@@ -80,8 +86,9 @@ description: |
   {何をする Skill か 1〜2文}。
   入力: {入力データの1行説明}
   出力: {出力形式の1行説明}
+  いつ使うか: {ユーザが「〜を分析して」と依頼した場合 / loader Skill が {軸単位} のデータを渡した場合}
 version: 0.1.0
-data_type: {spectral | chromatogram | image | diffraction | tabular | multimodal}
+data_type: {spectrum | timeseries | image | pattern | tabular | multimodal}
 target_instruments: [{装置カテゴリ1}, {装置カテゴリ2}]
 last_verified: YYYY-MM-DD
 ---
@@ -99,25 +106,27 @@ last_verified: YYYY-MM-DD
 
 ## ③出力形式
 - **主出力**: {JSON / CSV / PNG / Markdown レポート}
-- **必須フィールド**: {peak_positions, area, r_squared, ...}
-- **信頼度指標**: {SNR, フィット残差, 検証済みフラグ}
+- **必須フィールド**: {peaks, plot_path, discussion, provenance}
+- **provenance（必須）**: `input_sha256` / `skill_version` / `run_datetime_utc` / `package_versions` / `random_seed`（乱数使用時）
 
-詳細は `references/output-schema.md`。
+詳細は `references/output-schema.md`（および JSON Schema の `references/output-schema.json`）。
 
 ## ④成功条件
 - {分析結果が {条件} を満たす}
 - {ユーザが結果を {検証プロセス} で確認できる}
-- {同一入力で同一出力（再現性）}
+- {同一入力で同一出力（再現性）——浮動小数点処理を含む場合は事前定義した許容差以内}
 
 ## ⑤禁止事項・受け付けない入力（fatal 拒否条件）
 - ❌ 必須カラム不足 → 分析実行せずエラーメッセージを返す
 - ❌ 装置ID・測定条件が不明 → 実行拒否
+- ❌ 物質同定・帰属推測をチャット応答に含めない（第7章 §7.5・第11・14章）
 - ❌ {データ型固有の禁止条件}
 
 ## ⑥再現性条件
 - 使用ライブラリ: {package_name==version}
-- 乱数シード: {seed 値または「未使用」}
-- 実行日時・実行者を出力に必ず記録
+- 標準環境ピン: `jupyter-mcp-server==0.14.4` / `tooluniverse==1.4.4`（第4・7章と一致）
+- 乱数を使う場合は seed を固定し `provenance.random_seed` に記録
+- 出力 `provenance` に `input_sha256` / `skill_version` / `run_datetime_utc` / `package_versions` を必須で記録
 
 ## 実行手順（4ステップ）
 1. **入力検証**: `scripts/validate_input.py` で契約を満たすか確認
@@ -129,20 +138,20 @@ last_verified: YYYY-MM-DD
 ```
 {装置名} で測定したデータ `{sample_path}` を、
 このSkillで分析して。結果は Markdown レポートで、
-図表と信頼度指標を含めて。
+図表と provenance を含めて。
 ```
 
-## 評価基準（第9章 §9.8 の6項目）
+## 評価基準（第7章 §7.5 / 第9章 §9.8 の6項目）
 - [ ] 正確性: {検証データで既知の正解と一致}
-- [ ] 再現性: {同一入力→同一出力}
+- [ ] 再現性: {同一入力→同一出力（許容差以内）}
 - [ ] 解釈可能性: {なぜその結果になったかを説明できる}
-- [ ] データ漏洩リスク: {外部送信されるフィールドを明示}
+- [ ] データ漏洩リスク: {`agent_visible_metadata` と `private_provenance` の分離を確認}
 - [ ] レビュー容易性: {人間が3分以内で妥当性判定できる}
 - [ ] 転用可能性: {類似データ型に差分だけで転用可能か}
 ````
 
 > [!WARNING]
-> `data_type` フィールドは A.3 のデータ型別テンプレートと紐付いています。**マルチモーダル統合型を除き、1 Skill = 1 データ型** を推奨します（第7章 §7.5）。
+> `data_type` フィールドは A.3 のデータ型別テンプレートと紐付いています。**マルチモーダル統合型を除き、1 Skill = 1 データ型** を推奨します（第7章 §7.5・第13章 §13.1）。テンプレート名の推奨は第13章 §13.1 の命名規約（`spectrum-analysis`／`timeseries-analysis`／`image-analysis`／`pattern-analysis`／`tabular-analysis`／`multimodal-integrator`）に従います。
 
 ### A.2.3 `references/input-schema.md` テンプレート
 
@@ -184,16 +193,13 @@ last_verified: YYYY-MM-DD
 ````markdown
 # 出力スキーマ
 
-## 主出力（JSON）
-```json
+## 主出力（JSON、例示）
+
+> 以下は説明用の JSON-like 例示です（`/* ... */` は注釈）。実運用では `references/output-schema.json` を JSON Schema として別途整備し、CI で validate してください（第9章 §9.5・第11章 §11.4）。
+
+```jsonc
 {
   "skill": "my-first-analysis-skill",
-  "skill_version": "0.1.0",
-  "input": {
-    "sample_id": "S-2026-001",
-    "instrument_id": "XRD-01",
-    "file_hash_sha256": "..."
-  },
   "results": {
     /* データ型ごとの中核結果（A.3 参照） */
   },
@@ -202,17 +208,36 @@ last_verified: YYYY-MM-DD
     "fit_r_squared": 0.987,
     "n_points": 4096
   },
-  "reproducibility": {
-    "executed_at": "2026-07-04T10:00:00+09:00",
-    "executed_by": "nahisaho",
-    "python": "3.12.1",
-    "packages": {"numpy": "2.0.1", "scipy": "1.13.0"},
-    "seed": 42
+  "provenance": {
+    "input_sha256": "a1b2c3...（64 hex）",
+    "skill_version": "0.1.0",
+    "run_datetime_utc": "2026-07-04T01:00:00Z",
+    "package_versions": {
+      "python": "3.12.1",
+      "numpy": "2.0.1",
+      "scipy": "1.13.0",
+      "jupyter-mcp-server": "0.14.4",
+      "tooluniverse": "1.4.4"
+    },
+    "random_seed": 42
   },
   "review_required": false,
-  "warnings": []
+  "warnings": [],
+  "discussion": "対応づけまで／解釈なし。詳細は Markdown レポート参照。"
 }
 ```
+
+## `provenance` 必須フィールド（第7・9・11章共通）
+
+| フィールド | 型 | 説明 |
+|---|---|---|
+| `input_sha256` | string (64 hex) | 入力ファイルの SHA-256 |
+| `skill_version` | string (SemVer) | この Skill のバージョン |
+| `run_datetime_utc` | string (ISO 8601, UTC) | 実行日時 |
+| `package_versions` | object | 使用したパッケージ名 → 版 |
+| `random_seed` | integer | 乱数を使う場合のみ必須 |
+
+マルチモーダル Skill は追加で `provenance.modality_inputs`（各モダリティ入力の `input_sha256` + `skill_version` 連鎖）を必須で持ちます（第11章 §11.4）。
 
 ## 副次出力
 - 図: `output/{sample_id}_summary.png`（1 枚に集約推奨）
@@ -223,26 +248,28 @@ last_verified: YYYY-MM-DD
 - 冒頭: 入力・成功条件・主要結果を **3 行以内で要約**
 - 図表: 主要指標を 1 図 + 1 表
 - 検証: `quality_metrics` を明示
-- 末尾: 再現用の実行コマンド
+- 末尾: 再現用の実行コマンドと `provenance` 抜粋
 ````
 
 ### A.2.5 `tests/test_smoke.py` テンプレート
 
 ```python
 """スモークテスト：ミニ入力で1件通ることだけを確認"""
-from pathlib import Path
 import json
 import subprocess
+import sys
+from pathlib import Path
 
-FIXTURE = Path(__file__).parent / "fixtures" / "sample_input.csv"
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+FIXTURE = SKILL_ROOT / "tests" / "fixtures" / "sample_input.csv"
+SCRIPT = SKILL_ROOT / "scripts" / "run_analysis.py"
 
 
 def test_skill_runs_on_fixture(tmp_path):
     """代表データが例外なく最後まで走ること"""
     out = tmp_path / "result.json"
     result = subprocess.run(
-        ["python", "scripts/run_analysis.py",
-         "--input", str(FIXTURE), "--output", str(out)],
+        [sys.executable, str(SCRIPT), "--input", str(FIXTURE), "--output", str(out)],
         capture_output=True, text=True, timeout=60,
     )
     assert result.returncode == 0, result.stderr
@@ -251,6 +278,11 @@ def test_skill_runs_on_fixture(tmp_path):
     assert payload["review_required"] in (True, False)
     assert "results" in payload
     assert "quality_metrics" in payload
+    prov = payload["provenance"]
+    assert len(prov["input_sha256"]) == 64
+    assert prov["skill_version"]
+    assert prov["run_datetime_utc"]
+    assert prov["package_versions"]
 ```
 
 > [!TIP]
@@ -290,25 +322,30 @@ def test_skill_runs_on_fixture(tmp_path):
 
 ### A.3.2 クロマトグラム・時系列型（GC / LC / TGA / DSC / プロセスログ）
 
-**差分ポイント**：時間軸・ベースラインドリフト・ピーク積分・イベント検出
+**差分ポイント**：時間 / 温度軸・ベースラインドリフト・ピーク積分・イベント検出
 
 - **入力スキーマ差分**
   - `x`: 時間 (min) / 温度 (°C) / タイムスタンプ
-  - 必須メタ: カラム型番 / 温度勾配 / 昇温速度 / 移動相
+  - 必須メタ: カラム型番 / 温度勾配 / 昇温速度 / 移動相 / センサ ID など（装置により異なる）
 - **分析ステップ差分**
   1. ベースライン補正: 局所線形 / ALS
-  2. ピーク検出＋積分: `scipy.integrate.trapezoid` または `pyOpenMS`
-  3. 保持時間の校正（内標準がある場合）
-  4. 定量: 検量線または面積比
-- **出力 `results` 差分**
+  2. **イベント / ピーク検出＋積分**（クロマト＝ピーク、TGA/DSC＝重量変化ステップや発熱ピーク、プロセスログ＝閾値越えイベント）
+  3. 保持時間・イベント時刻の校正（内標準・基準時刻がある場合）
+  4. 定量: 検量線・面積比・Δ 重量 など（装置ごと）
+- **出力 `results` 差分**（GC/LC 特有フィールドは任意）
   ```json
-  "peaks": [
-    {"retention_time": 5.42, "unit": "min",
-     "area": 12345.0, "height": 890.1,
-     "compound_candidate": null, "quantification_ug_per_ml": null}
+  "events": [
+    {"event_time_or_temperature": 5.42, "unit": "min",
+     "event_type": "peak",
+     "area_or_delta": 12345.0,
+     "height": 890.1,
+     "retention_time": 5.42,             /* GC/LC のみ任意 */
+     "compound_candidate": null,          /* GC/LC のみ任意 */
+     "quantification_ug_per_ml": null     /* GC/LC のみ任意 */
+    }
   ]
   ```
-- **fatal 拒否条件追加**：内標準が指定されているのにデータに存在しない
+- **fatal 拒否条件追加**：内標準・基準時刻が指定されているのにデータに存在しない
 - **既知の失敗**：ベースラインドリフト過大 → 積分値が装置間で比較不能
 
 ### A.3.3 画像・顕微鏡型（OM / SEM / TEM / AFM）
@@ -328,34 +365,42 @@ def test_skill_runs_on_fixture(tmp_path):
   "objects": {
     "count": 231,
     "size_distribution": {"mean_nm": 45.2, "std_nm": 12.1,
-                           "median_nm": 43.0, "hist_bins": [10,20,30,...]}
+                           "median_nm": 43.0, "hist_bins_nm": [10,20,30]}
   },
   "annotated_image": "output/S-2026-001_annotated.png"
   ```
-- **fatal 拒否条件追加**：ピクセルサイズ不明・スケールバー未検出
-- **既知の失敗**：セグメンテーション過剰分割 → 粒径分布の左裾が実体より短くなる
+- **fatal 拒否条件追加**：ピクセルサイズのメタデータもスケールバー抽出も両方失敗（片方でも取れれば実行可）
+- **既知の失敗**：セグメンテーション過剰分割 → 実体より小さい断片が多数生成され、粒径分布の**左裾が実体より長く**なり平均粒径が過小評価される
 
 ### A.3.4 回折・散乱パターン型（XRD / SAXS / 電子回折）
 
-**差分ポイント**：ピーク位置→d 値変換・相同定候補・Rietveld 前段
+**差分ポイント**：ピーク位置→d 値変換（2θ / q で式が異なる）・相同定候補・Rietveld 前段
 
 - **入力スキーマ差分**
-  - `x`: 2θ (deg) / q (Å⁻¹)
-  - 必須メタ: X 線波長 / 入射角 / ステップ幅
+  - `x`: 2θ (deg) **または** q (Å⁻¹)（`x_axis_type` フィールドで明示）
+  - 必須メタ:
+    - `2θ` 入力の場合: X 線波長 λ、入射角、ステップ幅
+    - `q` 入力の場合: q レンジ、ステップ幅（λ は不要）
 - **分析ステップ差分**
   1. 背景差引（低角側の急落含む）
   2. ピーク検出（プロファイル関数：pseudo-Voigt 推奨）
-  3. `d = λ / (2 sin θ)` 変換
+  3. **d 値変換（軸で分岐）**
+     - `2θ` の場合: `θ_rad = math.radians(two_theta_deg / 2)`；`d = λ / (2 * sin(θ_rad))`
+     - `q` の場合: `d = 2 * math.pi / q`（λ 不要）
   4. 相同定：PDF/COD 参照は Skill 内では **候補列挙まで**、確定は人間
 - **出力 `results` 差分**
   ```json
   "peaks": [
-    {"two_theta_deg": 26.5, "d_angstrom": 3.35,
-     "intensity": 4321.0, "phase_candidates": ["Graphite (002)"],
+    {"x_axis_type": "two_theta",
+     "two_theta_deg": 26.5,
+     "q_inv_angstrom": null,
+     "d_angstrom": 3.35,
+     "intensity": 4321.0,
+     "phase_candidates": ["Graphite (002)"],
      "confidence": "review_required"}
   ]
   ```
-- **fatal 拒否条件追加**：波長不明（PDF 照合不能）
+- **fatal 拒否条件追加**：`x_axis_type = two_theta` かつ波長 λ 不明（PDF 照合不能）／`x_axis_type` が明示されていない
 - **既知の失敗**：低角側の背景処理不備 → 存在しない小角ピークを検出
 
 ### A.3.5 表形式・プロセス条件型（成膜プロセス / リソグラフィ / 機械特性）
@@ -383,44 +428,64 @@ def test_skill_runs_on_fixture(tmp_path):
 
 ### A.3.6 マルチモーダル統合型（例：XRD + SEM + プロセス条件）
 
-**差分ポイント**：canonical shape・時間 / 空間対応・各モダリティの信頼度
+**差分ポイント**：canonical shape・共通キー・単位辞書・欠損モダリティ明示・**解釈しない**
 
 - **入力スキーマ差分**：各モダリティのファイル群をマニフェストで束ねる
   ```yaml
   # manifest.yaml
-  sample_id: S-2026-001
+  join_key_type: sample_id       # sample_id / time / position など第11章 §11.3
   modalities:
-    - type: xrd
+    - modality: xrd
+      join_key_value: S-2026-001
+      units: {two_theta: deg, intensity: counts}
+      quantities: [two_theta, intensity]
       file: xrd/S-2026-001.xy
-    - type: sem
+    - modality: sem
+      join_key_value: S-2026-001
+      units: {pixel_size: nm}
+      quantities: [image]
       file: sem/S-2026-001.tif
-    - type: tabular
+    - modality: tabular
+      join_key_value: S-2026-001
+      units: {deposition_rate: nm_per_min}
+      quantities: [deposition_rate, chamber_pressure]
       file: process/conditions.csv
   ```
 - **分析ステップ差分**
   1. 各モダリティを **単独データ型 Skill で処理**（A.3.1〜A.3.5 の出力を再利用）
-  2. 共通キー（`sample_id`）で `results` を統合
-  3. **canonical shape**（第11章 §11.4）に整形：`{sample_id, modality, features[], quality}`
-  4. モダリティ横断の一貫性チェック（例：XRD 相と SEM 粒径の物理的整合）
-- **出力 `results` 差分**
+  2. `join_key_type` と `join_key_value` で `matched_keys` / `missing_modalities` を作る
+  3. **canonical shape**（第11章 §11.4）に整形：`{join_key_type, matched_keys, missing_modalities, units, quantities, modalities, dataset, provenance, discussion}`
+  4. モダリティ横断の **観測ベースの対応づけ** をチェック（例：XRD 相候補と SEM 粒径の記述的整合を **flag** するだけ。因果・確定判定はしない）
+- **出力 `results` 差分**（第11章 §11.4 の canonical shape）
   ```json
+  "join_key_type": "sample_id",
+  "matched_keys": ["S-2026-001"],
+  "missing_modalities": [],
+  "units": {"two_theta": "deg", "pixel_size": "nm", "deposition_rate": "nm_per_min"},
+  "quantities": ["two_theta", "intensity", "image", "deposition_rate"],
   "modalities": {
-    "xrd": {...},
-    "sem": {...},
-    "tabular": {...}
+    "xrd": {"skill_version": "0.1.0", "results": {}},
+    "sem": {"skill_version": "0.1.0", "results": {}},
+    "tabular": {"skill_version": "0.1.0", "results": {}}
   },
-  "cross_modal_consistency": {
-    "passed": true,
-    "checks": [
-      {"name": "XRD phase vs SEM morphology", "result": "consistent"}
-    ]
-  }
+  "cross_modal_checks": [
+    {"name": "XRD phase candidates vs SEM morphology",
+     "result": "observed",
+     "note": "数値対応のみ。相の確定・因果判定はしない。"}
+  ]
   ```
-- **fatal 拒否条件追加**：`sample_id` が全モダリティで一致しない
-- **既知の失敗**：モダリティごとの前処理不整合（正規化基準がバラバラ）
+- **`provenance` 追加**：`modality_inputs`（各モダリティ入力の `input_sha256` + `skill_version` 連鎖、第11章 §11.4）
+- **fatal 拒否条件追加**：
+  - `join_key_type` が明示されていない
+  - `join_key_value` が全モダリティで一致しない（`matched_keys` が空）
+  - モダリティごとの単位が `units` 辞書に記載されていない
+- **既知の失敗**：
+  - `cross_modal_checks` に「因果」「相の確定」「材料同定」を書いてしまう → 第11・14章違反
+  - モダリティごとの前処理不整合（正規化基準がバラバラ）
 
 > [!IMPORTANT]
-> マルチモーダル統合型は **単独データ型 Skill を先に完成** させてから作ります。単独 Skill を統合するラッパー、という位置づけです（第11章 §11.7）。
+> マルチモーダル統合 Skill は **統合結果を断定してはいけません**（第11章 §11.1）。`cross_modal_checks[].result` に許される値は `observed / missing / conflict / review_required` のみで、`passed: true` のような自己判定・材料同定・相確定は禁止です（第14章 循環設計問題）。
+> また、マルチモーダル統合型は **単独データ型 Skill を先に完成** させてから作ります。単独 Skill を統合するラッパー、という位置づけです（第11章 §11.7）。
 
 ---
 
@@ -545,39 +610,39 @@ Skill `{source-skill}`（データ型: {source_type}）を、
 - [ ] 代表データ 1 件に対し、`results` と `quality_metrics` を含む JSON が出力される
 - [ ] 図表 1 枚と Markdown レポートが自動生成される
 
-### A.5.2 検証済み（第7章の評価6項目）
+### A.5.2 検証済み（第7章の評価6項目・安全項目を含む）
 
 - [ ] **正確性**：既知データで期待値と一致する（またはズレの原因を説明できる）
-- [ ] **再現性**：同一入力で 3 回実行し、`results` が bit-identical または許容誤差内
+- [ ] **再現性**：同一入力で 3 回実行し、`results` が bit-identical または事前定義した許容差以内
 - [ ] **解釈可能性**：主要な数値ごとに根拠（前処理・パラメータ・引用元）を追える
-- [ ] **データ漏洩リスク**：外部送信するフィールドを SKILL.md に明示し、意図通り
+- [ ] **データ漏洩リスク**：`agent_visible_metadata` と `private_provenance` の分離が実装され、外部送信フィールドを SKILL.md に明示している（第8章 §8.11 / 第11章 §11.2）
 - [ ] **レビュー容易性**：第三者が Markdown レポートを見て 3 分で妥当性判定できる
 - [ ] **転用可能性**：類似データ型に **差分だけの書き換え** で対応できる構造になっている
+- [ ] **fatal 拒否**：SKILL.md ⑤ の fatal 拒否条件が実装され、少なくとも 1 件のテストで発火することを確認済み
+- [ ] **入力スキーマ検証**：`references/input-schema.json` に対して valid でない入力が拒否されることを確認済み（第8章）
+- [ ] **既知失敗カタログ**：`references/failure-catalog.md` に既知失敗が最低 3 件記載されている
 
 ### A.5.3 再現できる
 
-- [ ] 実行日時・実行者・入力ハッシュが出力に含まれる
-- [ ] 使用パッケージのバージョンが `results.reproducibility.packages` に記録される
-- [ ] 乱数を使う場合は seed が固定・出力される
+- [ ] `provenance.input_sha256`（64 hex）が出力に含まれる
+- [ ] `provenance.skill_version` が SemVer で記録される
+- [ ] `provenance.run_datetime_utc`（UTC / ISO 8601）が記録される
+- [ ] `provenance.package_versions` に主要パッケージ + `jupyter-mcp-server==0.14.4` / `tooluniverse==1.4.4` が含まれる
+- [ ] 乱数を使う場合は `provenance.random_seed` が固定・出力される
 - [ ] 実行環境（Python バージョン・OS）が記録される
 - [ ] 同一環境で **半年後の自分** が再実行して同じ結果を得られる（心配なら実際に日をおいて試す）
+- [ ] マルチモーダル Skill の場合、`provenance.modality_inputs` に各モダリティ入力の `input_sha256` と `skill_version` が連鎖記録されている（第11章 §11.4）
 
-### A.5.4 安全（第6・14章の予防と事例）
+### A.5.4 拡張性（余力があれば・任意）
 
-- [ ] fatal 拒否条件（A.2.2 の ⑤）が実装され、テストされている
-- [ ] `references/failure-catalog.md` に既知失敗が最低 3 件記載されている
-- [ ] 外部送信のあるフィールドが SKILL.md に明示されている
-- [ ] MCP 経由の外部アクセスは Skill が明示的に許可したもののみ
-
-### A.5.5 拡張性（余力があれば）
-
+- [ ] 外部 MCP アクセスは Skill が明示的に許可したもののみ（第6章）
 - [ ] 別データ型への転用手順（A.4.5 のプロンプト）を試した実績がある
 - [ ] スモークテストに加え、境界値テストが 1 件以上ある
 - [ ] `examples/example_prompt.md` にコピペで動く実行例がある
 - [ ] 章末ワーク（第9〜11章）の演習を Skill に反映している
 
 > [!TIP]
-> **A.5.1〜A.5.3 まで揃えば「合格ライン」到達** です（第1章 §1.8）。A.5.4・A.5.5 は組織展開・長期運用に進むときに埋めます。
+> **A.5.1〜A.5.3 まで揃えば「合格ライン」到達** です（第1章 §1.8）。特に A.5.2 の「fatal 拒否 / 入力スキーマ検証 / 既知失敗カタログ」と A.5.3 の `provenance` 完全性は、第7章・第9章・第11章・第12章で共通の必須要件です。A.5.4 は組織展開・長期運用に進むときに埋めます。
 
 ---
 

@@ -13,11 +13,14 @@
 > [!NOTE]
 > 本章は**第9・10章との差分中心**の構成です。Skill ディレクトリ構造・progressive disclosure・6評価基準・承認ゲート・データ契約の 7 要素はすべて既出のため、必要に応じて第7〜10章を参照してください。
 
+> [!IMPORTANT]
+> 本書の合格ラインは「**動く・検証済み・再現できる**」の3拍子であり、「**失敗しない**」ことではありません。マルチモーダル統合では、統合結果を断定せず、**検証可能な対応づけ**と**再現可能な provenance**（各モダリティの入力 SHA-256・Skill バージョン・共通軸）を残すことを本章の合格ラインとします。
+
 ---
 
 ## 11.1　この章で作るSkillの概要（差分）
 
-第9章の分析Skillは 1 データ型に閉じており、第10章の文献照合Skillも入力は「単一の分析結果」でした。本章では、**複数のモダリティ**（例：ラマン分光＋SEM 画像＋XRD パターン）を **1つの試料** に紐付けて解釈する Skill を追加します。
+第9章の分析Skillは 1 データ型に閉じており、第10章の文献照合Skillも入力は「単一の分析結果」でした。本章では、**複数のモダリティ**（例：ラマン分光＋SEM 画像＋XRD パターン）を **1つの試料** に紐付けて **対応づけた統合ビューを作る** Skill を追加します。**モダリティ間の解釈・帰属・総合考察は行いません**（それは第12章の検証および人間の判断領域）。
 
 ```mermaid
 flowchart LR
@@ -26,7 +29,7 @@ flowchart LR
     end
     subgraph New["本章：モダリティを束ねるSkill"]
         S["SEM 画像分析Skill"] -->|features| J2["features JSON"]
-        X["XRD 分析Skill"] -->|phases| J3["phases JSON"]
+        X["XRD 分析Skill"] -->|xrd features JSON| J3["xrd features JSON"]
         J1 & J2 & J3 --> M["multimodal-integrator<br/>（本章の成果物）"]
         M -->|試料IDで対応づけた<br/>統合ビュー| Report["統合レポート"]
     end
@@ -68,6 +71,13 @@ flowchart LR
 - **⑧統合キー**：`join_key_type` = `sample_id` | `sample_id_xy` | `sample_id_t` のいずれか1つ（各値の**構造**は §11.3 参照）
 
 契約に書いておけば、Skill は「その軸で対応が取れないデータは fatal で拒否」できます。
+
+> [!WARNING]
+> **マルチモーダル統合は単一 Skill より漏洩リスクが高い**（第6章 §6.6・第8章 §8.11）。複数 Skill の出力を束ねる過程で、`sample_id`・装置メタデータ・プロセス条件・課題番号・共同研究先名・raw 絶対パス・装置PCアカウントなどが再結合され、統合出力・チャット応答・ログに漏れやすくなります。以下を運用ルールに落としてください。
+>
+> - `join_key_value` に使う `sample_id` は**匿名化済み ID のみ**（例：`S001`）。実試料IDや発注番号を直接使わない
+> - `agent_visible_metadata`（Agent に渡してよい：匿名化ID・装置カテゴリ・非機密条件）と `private_provenance`（raw 絶対パス・課題番号・取得URL・取得者・共同研究先名・装置PCアカウント）を分離し、統合 Skill の入力・出力・チャット応答・ログには前者のみを流す
+> - 一部モダリティが機密（社内・特許出願前）の場合は、その Skill を `~/.copilot/skills/` に配置し、統合 Skill と分けて実行する（第6章 §6.5・§6.6）
 
 ---
 
@@ -132,8 +142,10 @@ tags: [multimodal, integration, xarray, join]
 - **モダリティ間の因果関係・物質同定・ピーク帰属を推測すること**（第9・10章と同じ）
 - Agent のチャット応答での物質同定・帰属推測（第9・10章と同じ）
 - 対応が取れないモダリティを空データで水増しして結合すること
+- **Skill および AI Agent は「総合考察」として物質同定・相決定・材料名の確定を生成してはならない**。出力できるのは観測事実・欠損・不整合・候補リストまで。最終的な帰属・相同定・材料確定は人間の研究者が独立参照点（標準試料・文献・既知手法）で行う
+- **物質同定・ピーク帰属・相同定・Rietveld による組成/相の自動確定を、出力ファイルにも Agent のチャット応答にも含めない**（第7・9・10章および第15章 `common_forbidden.yaml` と対応）
 
-**⑥ 再現性条件**：`join_key_type`・共通キー・モダリティごとの `version`／単位辞書／`quantities`／`missing_modalities` を、`provenance` 構造化フィールド（次節参照）に記録する。`discussion` にはこれらの要約と「対応づけまで／解釈なし」の一文を書く。
+**⑥ 再現性条件**：`join_key_type`・共通キー・モダリティごとの `version`／単位辞書／`quantities`／`missing_modalities` を、`provenance` 構造化フィールド（次節参照）に記録する。加えて **標準環境バージョン**（第4章と揃える）：Python / JupyterLab / GitHub Copilot CLI / `jupyter-mcp-server==0.14.4` / `tooluniverse==1.4.4` を明記し、`pip freeze` またはロックファイルを `references/env-lock.txt` に保存する。**各モダリティ入力の `provenance.input_sha256` を保持し、統合出力の `provenance.modality_inputs` に構造化して連鎖記録**することで、「どの Raman/XRD/SEM 入力から統合ビューを作ったか」を後から追跡可能にする。`discussion` にはこれらの要約と「対応づけまで／解釈なし」の一文を書く。
 
 ---
 
@@ -176,10 +188,22 @@ tags: [multimodal, integration, xarray, join]
     },
     "provenance": {
       "type": "object",
-      "required": ["skill_version", "modality_versions", "run_datetime_utc"],
+      "required": ["skill_version", "modality_versions", "modality_inputs", "run_datetime_utc"],
       "properties": {
         "skill_version":      {"type": "string"},
         "modality_versions":  {"type": "object", "additionalProperties": {"type": "string"}},
+        "modality_inputs": {
+          "type": "object",
+          "description": "各モダリティ入力の SHA-256 と Skill バージョンを連鎖記録",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["input_sha256", "skill_version"],
+            "properties": {
+              "input_sha256":  {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+              "skill_version": {"type": "string"}
+            }
+          }
+        },
         "run_datetime_utc":   {"type": "string", "format": "date-time"}
       }
     },
@@ -362,7 +386,11 @@ Skill 出力（構造抜粋、著者が実機で検証）：
 | **`join_key_value` の構造不一致**（`sample_id_xy` に文字列だけ渡した） | 使用者が構造を理解していない | `validate_join.py` の `_shape_matches` |
 | **重複** | 同じ試料で2回測定した結果を両方生 payload で渡した | `validate_join.py` の duplicate |
 | **モダリティ横断で物質同定**を Agent が回答 | ⑤禁止事項の未遵守 | プロンプト明示＋レビューで指摘 |
+| **偽のマルチモーダル収束**（3モダリティが同じ帰属を示唆） | 同一 `sample_id` 誤付与、同じ標準試料仮定、同じ既知材料名をプロンプトに含めた等の**相関した誤り** | 独立参照点（別ロットの標準試料・別著者の文献・別測定日の再測定）による人間の検証 |
 | 対応 0 でも "見せかけの空Dataset" を返す | ④成功条件の未遵守 | matched_keys 0 で fatal |
+
+> [!WARNING]
+> **見かけの収束は独立証拠ではありません**。Raman + XRD + SEM が全て「Si の diamond 構造」を示唆したように見えても、それぞれが同じ誤った `sample_id` 割り当て、同じ校正誤差、同じ先入観（プロンプトに含めた材料名）、同じ前処理を共有していれば、3モダリティが**相関した誤り**を出すだけです。マルチモーダルの一致は仮説の強化にはなりますが、**確定した帰属の根拠にはなりません**。人間が独立参照点（別ロットの標準試料・独立測定・別文献）で検証してください。
 
 ### 改善版：単位混在の修正
 

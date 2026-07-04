@@ -20,6 +20,75 @@
 
 **テンプレの共通要素**（6 要素）は第4章 §4.2 に準拠：①目的 / ②入力条件 / ③出力形式 / ④成功条件 / ⑤禁止事項（severity 付き）/ ⑥再現性条件。
 
+### A.1.1 Skill / リポジトリ配置規約（vol-01 A.2.1 の継承 + vol-02 追加要素）
+
+Skill ディレクトリ構造は **vol-01 付録A §A.2.1 と同一**です（`skills/<name>/SKILL.md`, `references/`, `scripts/`, `tests/`, `examples/`）。配置先も同じ 3 系統：
+
+- **リポジトリ配布**：`.github/skills/<name>/`（Copilot CLI 自動検出、実運用の推奨）
+- **個人利用**：`~/.copilot/skills/<name>/`
+- **下書き**：`skills/<name>/`（本書の説明・演習用。完成後にどちらかへ移す）
+
+vol-02 で新規に登場するパスは **Skill ディレクトリの内側** と **リポジトリルート** の 2 箇所に分かれます。混乱を避けるため、以下を「どこに置くか」の一次リファレンスとして参照してください。
+
+**リポジトリルート（Skill 横断で共有される資産）**
+
+```
+<vol-02 repo root>/
+├── data/
+│   └── synthetic-hierarchy/          ← 本書提供の合成階層データ（第2章 §2.9）
+│       ├── main.csv
+│       └── repeated/                 ← 反復測定サブセット（第11章）
+├── scripts/
+│   └── generate_synthetic_hierarchy.py   ← 合成データ生成（snake_case で統一）
+└── .github/skills/                   ← 各 Skill はここに配置（vol-01 A.2.1）
+    └── <skill-name>/
+        └── ...
+```
+
+**Skill ディレクトリの内側（vol-02 で追加される 2 ディレクトリ）**
+
+vol-01 の `SKILL.md` / `references/` / `scripts/` / `tests/` / `examples/` に加え、統計/ML 章で扱う「学習成果物」と「診断図」の置き場を明示します。
+
+```
+.github/skills/<skill-name>/
+├── SKILL.md                          ← vol-01 A.2.2（同一）
+├── references/                       ← vol-01 A.2.3〜（同一）
+├── scripts/                          ← vol-01 A.2（同一）
+├── tests/                            ← vol-01 A.2（同一）
+├── examples/                         ← vol-01 A.2（同一）
+├── artifacts/                        ← ★vol-02 追加：学習・推論の永続化物
+│   ├── model_v<SemVer>.pkl                 sklearn モデル（第5-8章）
+│   ├── posterior_v<SemVer>.nc              PyMC InferenceData（第10-12章）
+│   └── permimp.csv                          permutation importance（第8章）
+└── figures/                          ← ★vol-02 追加：診断・可視化の PNG/PDF
+    ├── pca_scree_v<SemVer>.png
+    ├── ppc_bpv_v<SemVer>.png
+    └── trace_v<SemVer>.png
+```
+
+**規約サマリ**
+
+| パス | 場所 | 例 | Git 追跡 |
+|---|---|---|---|
+| `data/synthetic-hierarchy/` | **リポジトリルート** | 本書提供の合成階層データ | 追跡（大容量なら LFS） |
+| `scripts/generate_synthetic_hierarchy.py` | **リポジトリルート**（Skill 横断で使う共通スクリプト）| 合成データ生成 | 追跡 |
+| `.github/skills/<name>/scripts/` | Skill 内 | Skill 固有のスクリプト | 追跡 |
+| `.github/skills/<name>/artifacts/` | Skill 内 | 学習済みモデル、posterior | **通常 gitignore**（provenance の `output_artifacts.model_sha256` で hash 検証。大きい成果物は別ストレージ + URI 参照）|
+| `.github/skills/<name>/figures/` | Skill 内 | 診断図 | 通常 gitignore（PR 添付や docs/ に選抜） |
+
+**命名規約**
+
+- **Skill 名**：ケバブケース（`sklearn-supervised-matbench-gap`）— vol-01 A.2.1 と同じ
+- **スクリプト名**：スネークケース（`run_analysis.py`, `generate_synthetic_hierarchy.py`）— vol-01 A.2 と同じ
+- **成果物ファイル名**：`<name>_v<SemVer>.<ext>`（例: `model_v1.0.0.pkl`, `posterior_v1.0.0.nc`）
+- **provenance からの参照**：常に **Skill ディレクトリからの相対パス**（`artifacts/model_v1.0.0.pkl`）。絶対パスや `~/...` は書かない
+
+> **本付録以降のパス表記の読み方**
+>
+> - 頭に `data/` があるパス（例: `data/synthetic-hierarchy/`）→ **リポジトリルート**からの相対
+> - 頭に `scripts/generate_synthetic_hierarchy.py` → 例外的に **リポジトリルート**（合成データ生成は横断的資産のため）
+> - 頭に `artifacts/` / `figures/` / `references/` / `tests/` があるパス → **`.github/skills/<name>/` 内**の相対
+
 ---
 
 ## A.2 教師あり学習 Skill テンプレート（第5章）
@@ -328,7 +397,7 @@ layer_3:
   skill_id: pymc_hierarchical_v1
   data_source: synthetic
   synthetic_dataset:
-    generator_script: scripts/gen_synthetic_hierarchy.py
+    generator_script: scripts/generate_synthetic_hierarchy.py   # リポジトリルート（§A.1.1）
     generator_script_sha256: <hash>
     seed: 0
     true_params:
@@ -382,7 +451,7 @@ inputs:                                # ★
   feature_columns: [f1, f2, ...]       # ★ Ch5, Ch7
   target_column: y                     # ★
 output_artifacts:                      # ★
-  model_path: artifacts/model_v1.pkl
+  model_path: artifacts/model_v1.0.0.pkl   # .github/skills/<name>/artifacts/ 配下（§A.1.1）
   model_sha256: <64 hex>
 
 package_versions:                      # ★
@@ -530,7 +599,7 @@ output_hashes: {y_pred_calib: <sha256>, ...}
 # ---------- 監査・失敗管理（Ch14-15） ----------
 data_source: real | synthetic          # ★ Ch14 §14.8
 synthetic_dataset:                     # data_source=synthetic のとき必須
-  generator_script: scripts/gen_synthetic_hierarchy.py
+  generator_script: scripts/generate_synthetic_hierarchy.py   # リポジトリルート（§A.1.1）
   generator_script_sha256: <64 hex>
   seed: 0
   true_params: {sigma_lab: 0.5, ...}   # 合成データなので既知

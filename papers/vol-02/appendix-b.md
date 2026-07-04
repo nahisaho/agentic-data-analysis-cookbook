@@ -148,12 +148,13 @@ az.plot_bpv(idata, kind="u_value")       # PIT （probability integral transform
 ### B.2.5 InferenceData の永続化
 
 ```python
-idata.to_netcdf("artifacts/posterior_v1.nc")     # 保存
-idata = az.from_netcdf("artifacts/posterior_v1.nc")  # 読み込み
+# path は Skill ディレクトリからの相対（.github/skills/<name>/artifacts/、付録a §A.1.1）
+idata.to_netcdf("artifacts/posterior_v1.0.0.nc")     # 保存
+idata = az.from_netcdf("artifacts/posterior_v1.0.0.nc")  # 読み込み
 
 # hash for provenance
 import hashlib
-with open("artifacts/posterior_v1.nc", "rb") as f:
+with open("artifacts/posterior_v1.0.0.nc", "rb") as f:
     sha = hashlib.sha256(f.read()).hexdigest()
 ```
 

@@ -461,7 +461,7 @@ interpretation_report:
     ale_package:  PyALE 1.2.0   # ALE 実施時
 
   permutation_importance:
-    file:                       artifacts/permimp.csv
+    file:                       artifacts/permimp.csv     # .github/skills/<name>/artifacts/ 配下（付録A §A.1.1）
     n_repeats:                  30
     scoring:                    neg_root_mean_squared_error
     baseline_score:             -0.85     # 符号込みで記録（§8.3 落とし穴 4）

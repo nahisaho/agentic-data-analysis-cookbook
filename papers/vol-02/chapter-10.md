@@ -447,7 +447,7 @@ provenance:
     jax_x64:          null           # numpyro 使用時のみ true
 
   posterior_artifact:
-    path:             artifacts/idata.nc
+    path:             artifacts/posterior_v1.0.0.nc     # .github/skills/<name>/artifacts/ 配下（付録A §A.1.1）
     format:           netCDF
     sha256:           ...
 

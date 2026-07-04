@@ -98,7 +98,7 @@ data_split = dict(
 
 ### 合成階層データ層
 
-Layer 3 用の合成階層データセット（`data/synthetic-hierarchy/`、本書 2 章 §2.9 参照）を使います。想定構造は 3 階層：
+Layer 3 用の合成階層データセット（リポジトリルート `data/synthetic-hierarchy/`、本書 2 章 §2.9 参照。配置規約は付録A §A.1.1）を使います。想定構造は 3 階層：
 
 - **実験室** `lab_id` ∈ {0, 1, 2}（3 lab）
 - **装置** `inst_id` ∈ 各 lab に 2〜3 台

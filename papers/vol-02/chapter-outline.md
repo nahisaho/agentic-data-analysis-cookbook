@@ -42,7 +42,7 @@
   - **本格演習**:
     - 表形式・物性予測 → **MatBench**（`matbench_expt_gap`, `matbench_steels` など、材料 ML ベンチマーク）
     - スペクトル→ **RRUFF Raman データベース**（Raman ケーススタディとして。他分光への一般化は「型」として説明）
-  - **階層モデル（Ch11・Ch13 capstone）**: **ARIM 風の合成階層データ**を本書で提供（`data/synthetic-hierarchy/` 想定）。装置間・ロット間・研究室間の階層メタを明示的に持たせる。**実データ候補は付録C に列挙**
+  - **階層モデル（Ch11・Ch13 capstone）**: **ARIM 風の合成階層データ**を本書で提供（リポジトリルート `data/synthetic-hierarchy/` 想定、配置規約は付録A §A.1.1）。装置間・ロット間・研究室間の階層メタを明示的に持たせる。**実データ候補は付録C に列挙**
   - ライセンス・引用ルールは第2章で扱う
 - **参照**:
   - PyMC 公式: https://www.pymc.io/

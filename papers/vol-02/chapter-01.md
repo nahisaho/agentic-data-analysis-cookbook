@@ -97,7 +97,7 @@ flowchart TD
 - **主用途**：校正曲線のベイズ推定、反応速度の事後分布、**反復測定・ロット差・測定誤差**（必要に応じて装置間差）の階層モデル
 - **成果物**：`SKILL.md` + `references/` + `tests/` の形で書かれた、`sampler_config` / `posterior_artifact` / `diagnostics_summary` 付きの推定/予測 Skill
 - **含まれる規律**：事前分布の物理的正当化、**交差検証（CV）と同種の予測性能評価**（PSIS-LOO 等）、$\hat{R}$ / ESS / divergences の確認、事後予測チェック、`InferenceData` の永続化
-- **扱うデータ**：vol-01 のスペクトル型サンプル、ARIM 風の**合成階層データ**（`data/synthetic-hierarchy/`、第2章で入手方法を提示）
+- **扱うデータ**：vol-01 のスペクトル型サンプル、ARIM 風の**合成階層データ**（リポジトリルートの `data/synthetic-hierarchy/`、第2章で入手方法を提示。配置規約は付録A §A.1.1）
 
 ### Advanced Capstone：階層モデルの拡張（第13〜15章）
 

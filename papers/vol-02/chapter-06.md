@@ -312,7 +312,7 @@ is_anomaly = pipeline.named_steps["model"].predict(X_train) == -1
 - **異常度分布**（異常検知）：ヒストグラム + 閾値線
 - **優先度ランキング**（異常検知）：上位 K 件のサムネイル（画像なら画像、パターンならプロット）
 
-**可視化ファイルも provenance の一部**として保存します（`figures/pca_scree_v0.1.0.png` のようにバージョン付き）。エージェントが**毎回図を再生成することを防ぐ**ため、次の figure manifest を保存します：
+**可視化ファイルも provenance の一部**として保存します（Skill 配下 `figures/pca_scree_v0.1.0.png` のようにバージョン付き。配置規約は付録A §A.1.1）。エージェントが**毎回図を再生成することを防ぐ**ため、次の figure manifest を保存します：
 
 ```yaml
 figures:

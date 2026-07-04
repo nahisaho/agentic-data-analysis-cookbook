@@ -100,7 +100,7 @@ $$
 import pymc as pm
 import numpy as np
 
-# 合成階層データ（data/synthetic-hierarchy/ から）
+# 合成階層データ（リポジトリルート data/synthetic-hierarchy/ から、付録A §A.1.1）
 # sample_id: 各測定がどの試料か、shape=(N,)
 # y_obs:     測定値、shape=(N,)
 
@@ -514,7 +514,7 @@ provenance:
 
 ### 合成階層データ
 
-本章の例は **`data/synthetic-hierarchy/`** の合成データを想定しています（第2章 §2.9 で予告）。実データ候補は付録 C。
+本章の例は **リポジトリルートの `data/synthetic-hierarchy/`**（配置規約は付録A §A.1.1）の合成データを想定しています（第2章 §2.9 で予告）。実データ候補は付録 C。
 
 - **なぜ合成か**：階層構造が制御可能で「真値」が既知、Skill が正しく回収できるかを検証できる
 - **提供される階層**：試料 × 繰り返し / 試料 × ロット / 試料 × 装置 / 3 階層フル
@@ -526,7 +526,7 @@ provenance:
 
 ## 11.10 章末ワーク
 
-1. **反復測定モデルを 5 分で走らせる**：`data/synthetic-hierarchy/repeated/` から `sample_id` と `y_obs` を読み込み、§11.3 のモデルを NumPyro で回す。`sigma_obs / sigma_sample` 比を計算し、繰り返し数の設計判断を書く
+1. **反復測定モデルを 5 分で走らせる**：リポジトリルート `data/synthetic-hierarchy/repeated/` から `sample_id` と `y_obs` を読み込み、§11.3 のモデルを NumPyro で回す。`sigma_obs / sigma_sample` 比を計算し、繰り返し数の設計判断を書く
 2. **ロット差の意思決定**：§11.4 のモデルで `P(sigma_lot > 0.05)` を計算し、Skill 仕様書の④成功条件に**閾値ベース確率**を書く
 3. **識別性チェック**：§11.5 の測定誤差モデルで、`sigma_obs` に**強い prior**（例：`HalfNormal(0.1)`）と**弱い prior**（例：`HalfNormal(5.0)`）で走らせ、`sigma_x` の事後がどう変わるかを比較する
 4. **中心化 → 非中心化への切替**：§11.6 の両バリアントで同じデータを走らせ、`n_divergences` を比較。差が出たら `switched_from` を provenance に記録
@@ -552,7 +552,7 @@ provenance:
 
 ### 本書内の該当章
 
-- 第2章 §2.9：合成階層データ `data/synthetic-hierarchy/` の位置づけ
+- 第2章 §2.9：合成階層データ `data/synthetic-hierarchy/`（リポジトリルート、付録A §A.1.1）の位置づけ
 - 第4章 §4.3：`task_type: bayesian_inference`
 - 第9章：`uncertainty_scheme`（`posterior_quantity: threshold_probability` を本章で活用）
 - 第10章 §10.6：非階層の Bayesian（本章はその拡張）

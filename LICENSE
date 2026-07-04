@@ -2,8 +2,8 @@
 
 ## 日本語（概要）
 
-本リポジトリの著作物（書籍「AI エージェント時代のデータ分析入門」の原稿および関連文書）は、
-**クリエイティブ・コモンズ 表示 - 非営利 4.0 国際 (CC BY-NC 4.0)** ライセンスの下で提供されます。
+本リポジトリの著作物（書籍「AI エージェント時代のデータ分析入門」の原稿、図表、コード例、および関連文書）は、
+**クリエイティブ・コモンズ 表示 - 非営利 - 継承 4.0 国際 (CC BY-NC-SA 4.0)** ライセンスの下で提供されます。
 
 Copyright (c) 2026 nahisaho
 
@@ -11,19 +11,20 @@ Copyright (c) 2026 nahisaho
 
 - **表示 (BY)**: 適切なクレジットを表示し、ライセンスへのリンクを提供し、変更があった場合はその旨を示す必要があります。
 - **非営利 (NC)**: 本著作物を**営利目的で利用してはなりません**。
+- **継承 (SA)**: 本著作物を改変・変換・翻案した場合、あなたはその貢献物を**元の作品と同じライセンス (CC BY-NC-SA 4.0)** の下に頒布しなければなりません。
 
 ライセンスの全文（法的コード）およびわかりやすい要約は以下を参照してください。
 
-- 要約 (Deed): https://creativecommons.org/licenses/by-nc/4.0/deed.ja
-- 全文 (Legal Code): https://creativecommons.org/licenses/by-nc/4.0/legalcode.ja
+- 要約 (Deed): https://creativecommons.org/licenses/by-nc-sa/4.0/deed.ja
+- 全文 (Legal Code): https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode.ja
 
 ---
 
 ## English (Summary)
 
-The works in this repository (the manuscript and related documents of the book
+The works in this repository (the manuscript, figures, code examples, and related documents of the book
 "Introduction to Data Analysis in the Age of AI Agents") are licensed under the
-**Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0)** license.
+**Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)** license.
 
 Copyright (c) 2026 nahisaho
 
@@ -33,8 +34,10 @@ the material, under the following terms:
 - **Attribution (BY)**: You must give appropriate credit, provide a link to the license,
   and indicate if changes were made.
 - **NonCommercial (NC)**: You may **not** use the material for commercial purposes.
+- **ShareAlike (SA)**: If you remix, transform, or build upon the material, you must
+  distribute your contributions under the **same license (CC BY-NC-SA 4.0)** as the original.
 
 For the full legal text and a human-readable summary, see:
 
-- Deed: https://creativecommons.org/licenses/by-nc/4.0/
-- Legal Code: https://creativecommons.org/licenses/by-nc/4.0/legalcode
+- Deed: https://creativecommons.org/licenses/by-nc-sa/4.0/
+- Legal Code: https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode

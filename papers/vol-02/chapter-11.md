@@ -123,10 +123,21 @@ with pm.Model(coords={"sample": np.arange(n_samples),
     idata = pm.sample(
         draws=1000, tune=1000, chains=4,
         nuts_sampler="numpyro",         # §10.9 の準備を活用
-        target_accept=0.95,             # 階層モデルは 0.90 だと divergences が出やすい
+        target_accept=0.90,             # 中心化 & divergences なしなら 0.90 で開始
         random_seed=42,
     )
 ```
+
+> [!TIP]
+> **`sample_id` は 0-based int**：PyMC の fancy indexing は 0-based の整数 ndarray を想定しています。文字列やカテゴリ型をそのまま渡すと失敗します。
+>
+> ```python
+> sample_id = np.asarray(sample_id, dtype="int64")
+> assert sample_id.min() == 0
+> assert sample_id.max() == n_samples - 1
+> ```
+>
+> `lot_id`, `inst_id` も同様。
 
 ### 読み方
 
@@ -170,17 +181,26 @@ with pm.Model(coords={"lot":    np.arange(n_lots),
     idata_lot = pm.sample(
         draws=1000, tune=1000, chains=4,
         nuts_sampler="numpyro",
-        target_accept=0.95, random_seed=42,
+        target_accept=0.90, random_seed=42,
     )
 ```
 
+> [!WARNING]
+> **G が小さいと `sigma_lot` は prior 依存**：ロット数 G < 5 のとき、`sigma_lot` の事後分布は**強く prior に依存**します（データ 1 個から母集団分散は推定できないのと同じ理屈）。以下を必須運用にします：
+>
+> - `sensitivity_alternatives` で `sigma_lot` の prior を 2〜3 種類試す（第10章 §10.7）
+> - Skill 仕様書 ⑤（禁止事項）に「G < 5 の階層モデルで sigma_group を単独証拠にしない」を追加
+> - G が増やせるならデータ設計側で追加を検討
+
 ### 「ロット差は無視できるか」判定
 
-`sigma_lot` の**事後分布**を見ます：
+`sigma_lot` の**事後分布**を、閾値 $\tau$（例：0.05 eV）と比較して 3 判定：
 
-- **CrI 95% が実務閾値（例：0.05 eV）以下** → ロット差は実務上無視できる（完全プーリングに簡略化可）
-- **CrI 95% が閾値を跨ぐ** → 判定保留、追加ロットで検証
-- **CrI 95% が閾値以上** → **ロット差は無視できない**、階層モデルを維持
+| 判定 | 条件 | 結論 |
+|---|---|---|
+| **無視できる** | 95% CrI の**上端** < $\tau$ | ロット差は実務上小さい、完全プーリング化を検討 |
+| **無視できない** | 95% CrI の**下端** > $\tau$ | ロット差は明確、階層モデルを維持 |
+| **保留** | 95% CrI が $\tau$ を跨ぐ | データ追加、prior 感度分析、意思決定閾値の再検討 |
 
 > [!IMPORTANT]
 > **`sigma_lot ≈ 0` を「無視できる」と誤読しない**：Bayesian では**事後分布そのもの**を判断材料にします。「点推定が 0.02 だから小さい」は不十分。閾値ベースで **確率的な意思決定**を行い、`P(sigma_lot > threshold | data)` を Skill 出力に含めます：
@@ -214,7 +234,7 @@ with pm.Model(coords={"obs": np.arange(len(y_obs))}) as meas_error:
     sigma_x    = pm.HalfNormal("sigma_x", sigma=2.0)          # 真値の分布
     sigma_obs  = pm.HalfNormal("sigma_obs", sigma=1.0)         # 装置ノイズ
 
-    # 潜在真値：観測数と同じ次元
+    # 潜在真値：観測ごとに独立の真値（=単発測定・n 試料 = n 観測のケース）
     x_true = pm.Normal("x_true", mu=mu, sigma=sigma_x, dims="obs")
 
     # 観測モデル
@@ -224,9 +244,26 @@ with pm.Model(coords={"obs": np.arange(len(y_obs))}) as meas_error:
     idata_me = pm.sample(
         draws=1000, tune=1000, chains=4,
         nuts_sampler="numpyro",
-        target_accept=0.95, random_seed=42,
+        target_accept=0.90, random_seed=42,
     )
 ```
+
+> [!IMPORTANT]
+> **反復測定がある場合は `x_true` を `sample` 次元に**：同じ試料を複数回測っているなら、真値は**観測ごと**ではなく**試料ごと**です：
+>
+> ```python
+> with pm.Model(coords={"sample": np.arange(n_samples),
+>                        "obs":    np.arange(len(y_obs))}) as meas_error_repeated:
+>     ...
+>     x_true = pm.Normal("x_true", mu=mu, sigma=sigma_x, dims="sample")
+>     y = pm.Normal("y", mu=x_true[sample_id], sigma=sigma_obs,
+>                   observed=y_obs, dims="obs")
+> ```
+>
+> 前者と後者を混同すると、装置ノイズ `sigma_obs` の推定が歪みます（前者は `sigma_obs` を過小、後者は正しく分離）。
+
+> [!TIP]
+> **スケール選択**：反応速度定数・拡散係数・強度比などは**対数スケールで階層モデルを組む方が自然**な場合があります（例：`x_true` を `Normal` ではなく `LogNormal`、あるいはあらかじめ `y_log = np.log(y_obs)` で対数化）。物理量がゼロ・負を取りうるかを確認してから決めます。
 
 ### 識別性の注意
 
@@ -286,14 +323,26 @@ with pm.Model(coords={"sample": np.arange(n_samples),
 
 ### いつどちらを使うか
 
+**根本原則**は「funnel geometry を避ける」ことです。実務的には、**グループごとの尤度がどれだけ強いか**で決まります [[11-3]](#ref-11-3)：
+
 | 状況 | 推奨パラメータ化 | 理由 |
 |---|---|---|
-| $\sigma_\alpha$ の事後が小さい（強い情報借用） | **非中心化** | funnel 回避 |
-| $\sigma_\alpha$ の事後が大きい（グループ差大） | 中心化 | posterior が漏斗状にならない |
-| データが少ないグループがある | **非中心化** | 情報借用時の探索効率 |
-| データが多く、事前に $\sigma_\alpha$ が中〜大とわかる | 中心化 | 実装が読みやすい |
+| **グループごとのデータが少ない**（1〜5 観測/群） | **非中心化** | 尤度が弱く、事後が prior 由来の漏斗状になる |
+| **グループごとのデータが多い**（30+ 観測/群） | 中心化 | 尤度が強く、事後が funnel から離れる |
+| $\sigma_\alpha$ の prior が広い（弱情報） | **非中心化** | 事後 $\sigma_\alpha$ が小さい領域に潜り込みやすい |
+| $\sigma_\alpha$ の事前情報が確度高く中〜大 | 中心化 | funnel geometry は発生しにくい |
+| **迷ったら** | **両方走らせて比較** | divergences・ESS・BFMI・runtime を比較 |
 
-**実務のデフォルト**：まず中心化で書く → divergences が出たら非中心化に切り替える。**両方を Skill バリアントとして持つ**のが安全策です。
+> [!NOTE]
+> **「事後の $\sigma_\alpha$ が小さい / 大きい」は結果**、原因ではありません。実装時点では**データの情報量と prior の広さ**で判断します。事後を見て切り替えるのは 2 回目のフィット以降。**両バリアントを Skill として保持**し、`switched_from` に切り替え履歴を残すのが本書のスタイルです。
+
+### 実務のフロー
+
+1. **中心化で書く**（読みやすさ優先、divergences があっても初期実験としてOK）
+2. `target_accept=0.90` でサンプリング
+3. divergences > 0 → 非中心化に切替 + 再サンプリング
+4. まだ divergences → `target_accept=0.95` に引き上げ
+5. まだ divergences → **モデル構造・prior・識別性**を疑う（第12章の判断論）
 
 > [!IMPORTANT]
 > **非中心化にすれば必ず解決するわけではない**：識別性の問題（§11.5）、prior の広すぎ、data の情報不足による本質的な難しさは reparameterization では解決しません。第12章の実務判断論で扱います。
@@ -327,7 +376,7 @@ with repeated_nc:
 
 ### provenance への追加記録
 
-第10章の `backend_config` に階層モデル特有の情報を追加：
+第10章の `backend_config` は本章以降**ネスト形が canonical**です。第10章のフラット形（`backend_config.backend`）は入門用の簡易表現で、本章から下記の primary/fallback 構造を正とします：
 
 ```yaml
 backend_config:
@@ -373,17 +422,25 @@ with pm.Model(coords={"sample": np.arange(n_samples),
     sigma_inst   = pm.HalfNormal("sigma_inst",   sigma=1.0)
     sigma_obs    = pm.HalfNormal("sigma_obs",    sigma=1.0)
 
-    # 非中心化
+    # 試料効果（非中心化）
     alpha_offset = pm.Normal("alpha_offset", 0.0, 1.0, dims="sample")
-    gamma_offset = pm.Normal("gamma_offset", 0.0, 1.0, dims="inst")
     alpha = pm.Deterministic("alpha",
                              mu_alpha + sigma_sample * alpha_offset, dims="sample")
+
+    # 装置効果：sum-to-zero を明示（mu_alpha との交絡回避）
+    gamma_raw       = pm.Normal("gamma_raw", 0.0, 1.0, dims="inst")
+    gamma_zero_mean = gamma_raw - gamma_raw.mean()
     gamma = pm.Deterministic("gamma",
-                             sigma_inst * gamma_offset, dims="inst")
+                             sigma_inst * gamma_zero_mean, dims="inst")
 
     y = pm.Normal("y", mu=alpha[sample_id] + gamma[inst_id],
                   sigma=sigma_obs, observed=y_obs, dims="obs")
 ```
+
+> [!IMPORTANT]
+> **sum-to-zero が必要な理由**：`gamma_i ~ Normal(0, sigma_inst)` だけでは、`mu_alpha` と `gamma` の実現平均が**識別不能に交絡**します（`mu_alpha + gamma_i = (mu_alpha + c) + (gamma_i - c)` が同じ尤度）。装置数 3〜5 の少 G では特に事後が発散しやすくなります。上記のように `gamma_raw - gamma_raw.mean()` で **`sum(gamma) = 0`** を強制するか、PyMC の `pm.ZeroSumNormal`（対応バージョンで）を使います。
+>
+> **少 G（G < 5）の警告**：装置数が少ないと `sigma_inst` は prior 依存が強くなります（§11.4 と同じ理屈）。`sensitivity_alternatives` を必須運用にします。
 
 ### 装置間差の意思決定
 
@@ -406,11 +463,21 @@ provenance:
   # 第11章で追加
   hierarchical_structure:
     levels:
-      - {name: sample,    n: 20,  data_per_level: 5}
-      - {name: lot,       n: 4,   data_per_level: 25}
-      - {name: instrument, n: 3,  data_per_level: 33}
-    partial_pooling_targets: [alpha, gamma]
+      - {name: sample,     n: 20,  data_per_level: 5}
+      - {name: lot,        n: 4,   data_per_level: 25}
+      - {name: instrument, n: 3,   data_per_level: 33}
+    structure_type: crossed             # nested / crossed / partially_crossed
+    partial_pooling_targets:  [alpha, gamma]
     complete_pooling_targets: [mu_alpha]
+    model_formula:
+      response:         y
+      likelihood:       Normal
+      linear_predictor: "alpha[sample_id] + gamma[inst_id]"
+      observation_dim:  obs
+    index_mapping:
+      sample_id: "obs -> sample"
+      inst_id:   "obs -> instrument"
+    zero_sum_constraints: [gamma]       # sum-to-zero を課した効果
 
   parameterization:
     strategy:            non_centered
@@ -425,9 +492,18 @@ provenance:
     reviewed_by:         "PI name"
 
   shrinkage_summary:
-    metric:              "|alpha_group - mu_alpha| / sigma_alpha"
-    n_shrunk_groups:     3      # 例：全体平均に強く引かれたグループ数
-    groups_with_low_ess: []
+    # 標準化群偏差（各群が母平均から何 σ_α 離れているか）
+    standardized_group_deviation:
+      metric: "|alpha_partial[g] - mu_alpha| / sigma_alpha"
+      max:    1.8
+      min:    0.1
+    # 縮み係数（no-pooling 推定 → partial-pooling 推定でどれだけ母平均に寄ったか）
+    shrinkage_factor:
+      metric: "1 - |alpha_partial[g] - mu_alpha| / |alpha_no_pooling[g] - mu_alpha|"
+      max:    0.72        # データ少 → 強い縮み
+      min:    0.08        # データ多 → ほぼ動かない
+    n_shrunk_groups:      3    # shrinkage_factor > 0.5 の群数
+    groups_with_low_ess:  []
 
   applicability_domain:
     instruments:         [inst-A, inst-B, inst-C]
@@ -465,7 +541,7 @@ provenance:
 - **反復測定・ロット差・測定誤差**は材料研究の 3 大階層シナリオ。それぞれの `sigma_*` を意思決定に接続する
 - **`P(sigma_lot > threshold | data)`** のような**閾値ベース確率**を Skill 出力に含める（`uncertainty_scheme.posterior_quantity: threshold_probability`）
 - **測定誤差モデルは識別性が要**。繰り返し測定 or 外部校正情報がないと解けない
-- **中心化 vs 非中心化**：divergences が出たら非中心化。両バリアントを持ち、`switched_from` を記録
+- **中心化 vs 非中心化**：グループごとのデータが少ない・prior が広いときは非中心化。divergences が出たら切替、両バリアントを持ち、`switched_from` を記録。`target_accept` は 0.90 で開始し、必要に応じて 0.95 → 0.99 へ
 - **NumPyro を推奨**：`jax_enable_x64` + `nuts_sampler="numpyro"` + `jax.devices()` を凍結
 - **装置間差**は Skill の適用範囲決定に直結。`applicability_domain` を Bayesian で駆動
 - 階層モデル Skill の provenance には **`hierarchical_structure` / `parameterization` / `identifiability_check` / `shrinkage_summary` / `applicability_domain`** を追加

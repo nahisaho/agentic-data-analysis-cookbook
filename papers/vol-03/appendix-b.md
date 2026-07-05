@@ -32,6 +32,17 @@
 
 ### B.2.1 決定論設定（起動時 1 回）
 
+> [!WARNING]
+> **`CUBLAS_WORKSPACE_CONFIG` は必ずプロセス起動時、`import torch` **より前**に設定してください**。cuBLAS は最初の CUDA op でハンドルを初期化した瞬間に環境変数を読み、それ以降の変更は無視されます。`set_deterministic()` を先に呼んでも、モジュールインポートで既に CUDA が触られていれば `torch.use_deterministic_algorithms(True)` は後の matmul で例外を出します（サイレントに非決定に戻るのではなく **fail-fast**）。**推奨**：launcher shell / systemd unit / `torchrun` の env 経由で `CUBLAS_WORKSPACE_CONFIG=:4096:8` と `PYTHONHASHSEED=<seed>` を渡す。
+
+```bash
+# scripts/run_train.sh — Python プロセス起動より前に env を確定
+export CUBLAS_WORKSPACE_CONFIG=:4096:8
+export PYTHONHASHSEED=42
+export HF_HUB_DISABLE_IMPLICIT_TOKEN=1     # B.4.1 参照
+exec torchrun --nproc_per_node=4 scripts/train.py --seed=42
+```
+
 ```python
 # scripts/_deterministic_setup.py
 import os
@@ -46,9 +57,17 @@ def set_deterministic(seed: int) -> None:
       - random_seed (vol-02)
       - numpy_seed / python_hash_seed / random_seed_per_worker (vol-03)
       - cudnn_deterministic / cudnn_benchmark / gpu_backend
+
+    重要: CUBLAS_WORKSPACE_CONFIG と PYTHONHASHSEED は launcher で
+    `import torch` 前に設定済みであることを本関数の冒頭で assert する。
     """
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"   # torch.use_deterministic_algorithms 前提
+    assert os.environ.get("CUBLAS_WORKSPACE_CONFIG") == ":4096:8", (
+        "CUBLAS_WORKSPACE_CONFIG must be set to ':4096:8' before importing torch "
+        "(export in launcher shell)."
+    )
+    assert os.environ.get("PYTHONHASHSEED") == str(seed), (
+        f"PYTHONHASHSEED must be exported as '{seed}' before python starts."
+    )
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -137,12 +156,14 @@ loader = DataLoader(
 ### B.2.5 Mixed Precision（AMP）と再現性の両立
 
 ```python
-from torch.cuda.amp import autocast, GradScaler
+# PyTorch 2.x: torch.amp.* に統一（torch.cuda.amp.* は deprecated）
+import torch
+from torch.amp import autocast, GradScaler
 
-scaler = GradScaler()
+scaler = GradScaler("cuda")
 for batch in loader:
     optimizer.zero_grad(set_to_none=True)
-    with autocast(dtype=torch.float16):     # bf16 の方が数値安定性が高い場合あり
+    with autocast("cuda", dtype=torch.float16):     # bf16 の方が数値安定性が高い場合あり
         logits = model(batch["x"].to(device))
         loss = loss_fn(logits, batch["y"].to(device))
     scaler.scale(loss).backward()
@@ -190,20 +211,25 @@ def setup_ddp() -> tuple[int, int]:
 import hashlib, json, os
 from datetime import datetime, timezone
 from pathlib import Path
-from safetensors.torch import save_file
+from safetensors.torch import save_model
 
 def save_checkpoint(model, ckpt_dir: Path, epoch: int, metrics: dict,
                     approval_record_id: str) -> Path:
     """
     Ch4 checkpoint_overwrite_policy: append_only の実装。
     ファイル名にエポック番号を含め、既存ファイルへの上書きを拒否。
+
+    注意: `safetensors.torch.save_file(model.state_dict())` は
+    tied weights（embedding と lm_head の共有等、HF LLM で頻出）で
+    失敗する。`save_model` は shared tensors を正しく処理するので
+    深層モデルでは save_model を推奨。
     """
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     fpath = ckpt_dir / f"epoch_{epoch:03d}.safetensors"
     if fpath.exists():
         raise RuntimeError(f"AG-03 (silent overwrite) prevented: {fpath}")
 
-    save_file(model.state_dict(), str(fpath))
+    save_model(model, str(fpath))
 
     # append-only registry
     sha = hashlib.sha256(fpath.read_bytes()).hexdigest()
@@ -325,18 +351,24 @@ p_train_step = jax.pmap(train_step, axis_name="batch")
 
 ### B.4.1 認証トークンの取り扱い
 
+> [!WARNING]
+> **`huggingface_hub.login()` は避ける**。`login()` は `add_to_git_credential=False` を渡しても **`~/.cache/huggingface/token` にトークンをファイル書き出しする**。HPC / 共有 FS ではトークン漏洩の温床（Ch14 DG-11）。**推奨は `token=os.environ["HF_TOKEN"]` を `HfApi` / `snapshot_download` / `from_pretrained` に直接渡すこと**、そして launcher で `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` を設定してトークンファイルの暗黙読み込みも遮断すること。
+
 ```python
 # 環境変数のみ許可、コード内 hardcode 禁止（Ch14 DG-11 対策）
+# login() は呼ばない。個別 API に token を直接渡す。
 import os
-from huggingface_hub import login
+from huggingface_hub import HfApi, snapshot_download
 
-token = os.environ.get("HF_TOKEN")
-assert token is not None, "HF_TOKEN must be set via env, never hardcoded"
-login(token=token, add_to_git_credential=False)
+_HF_TOKEN = os.environ.get("HF_TOKEN")
+assert _HF_TOKEN is not None, "HF_TOKEN must be set via env, never hardcoded"
+
+api = HfApi(token=_HF_TOKEN)
 
 # provenance:
-#   hf_auth_method: "env_var"
+#   hf_auth_method: "env_var_per_call"
 #   hf_token_scope_hash: sha256 of scope string (実トークンは書かない)
+#   hf_hub_disable_implicit_token: "1"  (launcher で export 済み)
 ```
 
 ### B.4.2 revision pin + Hub resolved SHA 一致検証
@@ -359,6 +391,7 @@ def verify_revision(repo_id: str, revision: str) -> None:
 ### B.4.3 snapshot_download で allow_patterns を絞る
 
 ```python
+import os
 from huggingface_hub import snapshot_download
 
 local_dir = snapshot_download(
@@ -371,32 +404,102 @@ local_dir = snapshot_download(
     ],
     # ignore_patterns で pickle / .bin / .msgpack を明示除外
     ignore_patterns=["*.bin", "*.msgpack", "*.h5", "*.pkl", "*.pt"],
+    token=os.environ["HF_TOKEN"],       # B.4.1、login() を使わない
 )
 ```
 
-### B.4.4 safetensors のみを許可するロードパス
+### B.4.4 safetensors のみを許可し、tokenizer / config も hash 検証するロードパス
+
+> [!IMPORTANT]
+> **hash 検証は weights だけでは不十分**。`tokenizer.json`（BPE merges、追加 special tokens）や `config.json`（vocab_size, rope_theta, num_hidden_layers）、`generation_config.json`（sampling defaults）は改ざんで振る舞いが変わる。**Ch11 §11.4 の canonical manifest は weights + tokenizer + config + generation_config を全て file-level sha256 で pin する**。
 
 ```python
 import hashlib
+import os
+from datetime import datetime, timezone
 from pathlib import Path
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoTokenizer, AutoConfig
+
+# Ch11 canonical: manifest schema
+# manifest = {
+#   "repo_id": "org/repo",
+#   "revision_commit_hash": "<40hex>",
+#   "hub_api_resolved_sha": "<40hex>",
+#   "declared_license": "cc-by-4.0",
+#   "pretraining_data_license": "cc-by-4.0",
+#   "pretraining_data_summary": "...",
+#   "model_family": "matbert",
+#   "fetch_method": "snapshot_download",
+#   "files_with_sha256": [                       # weights + tokenizer + config を全て
+#       {"file": "model.safetensors",       "kind": "weights",    "sha256": "..."},
+#       {"file": "tokenizer.json",          "kind": "tokenizer",  "sha256": "..."},
+#       {"file": "tokenizer_config.json",   "kind": "tokenizer",  "sha256": "..."},
+#       {"file": "special_tokens_map.json", "kind": "tokenizer",  "sha256": "..."},
+#       {"file": "config.json",             "kind": "config",     "sha256": "..."},
+#       {"file": "generation_config.json",  "kind": "config",     "sha256": "..."},
+#   ],
+# }
 
 def load_verified_fm(local_dir: str, manifest: dict):
-    """
-    manifest: 承認済み manifest（Ch11 §11.4）
-      - safetensors_files_with_sha256: [{file, sha256}, ...]
-      - declared_license, pretraining_data_license, model_family
-    """
-    # 1. file-level sha256 を全ファイルで照合
-    for entry in manifest["safetensors_files_with_sha256"]:
-        p = Path(local_dir) / entry["file"]
-        h = hashlib.sha256(p.read_bytes()).hexdigest()
-        assert h == entry["sha256"], f"hash mismatch: {entry['file']}"
+    """全ファイル hash 検証 + safetensors 経路限定ロード。"""
+    local_path = Path(local_dir).resolve()
 
-    # 2. safetensors 経路でロード（pickle 経路を明示遮断）
-    model = AutoModel.from_pretrained(local_dir, use_safetensors=True)
-    tokenizer = AutoTokenizer.from_pretrained(local_dir)
-    return model, tokenizer
+    # 1. file-level sha256 を weights + tokenizer + config で全件照合
+    seen_kinds = set()
+    for entry in manifest["files_with_sha256"]:
+        p = (local_path / entry["file"]).resolve()
+        # path traversal 防御: 解決後のパスが local_dir 配下にあること
+        assert str(p).startswith(str(local_path) + os.sep), \
+            f"path traversal blocked: {entry['file']}"
+        assert p.is_file(), f"missing manifest file: {entry['file']}"
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
+        assert h == entry["sha256"], (
+            f"hash mismatch for {entry['file']}: got {h}, expected {entry['sha256']}"
+        )
+        seen_kinds.add(entry["kind"])
+
+    # 2. weights / tokenizer / config の全 kind が manifest に含まれていること
+    for required_kind in ("weights", "tokenizer", "config"):
+        assert required_kind in seen_kinds, \
+            f"manifest missing required kind: {required_kind}"
+
+    # 3. safetensors 経路でロード（pickle 経路を明示遮断）
+    model = AutoModel.from_pretrained(local_dir, use_safetensors=True,
+                                      trust_remote_code=False)
+    tokenizer = AutoTokenizer.from_pretrained(local_dir, trust_remote_code=False)
+    config = AutoConfig.from_pretrained(local_dir, trust_remote_code=False)
+    return model, tokenizer, config
+
+
+def emit_fm_provenance(manifest: dict, local_dir: str) -> dict:
+    """
+    Ch11 canonical field 名で foundation_model_provenance を出力する共通ヘルパ。
+    Skill 側 provenance の該当セクションにそのまま入れる。
+    """
+    return {
+        "foundation_model_provenance": {
+            "used": True,
+            "repo_id": manifest["repo_id"],
+            "revision_commit_hash": manifest["revision_commit_hash"],
+            "hub_api_resolved_sha": manifest["hub_api_resolved_sha"],
+            "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
+            "declared_license": manifest["declared_license"],
+            "pretraining_data_license": manifest["pretraining_data_license"],
+            "pretraining_data_summary": manifest["pretraining_data_summary"],
+            "model_family": manifest["model_family"],
+            "safetensors_files_with_sha256": [
+                e for e in manifest["files_with_sha256"] if e["kind"] == "weights"
+            ],
+            "tokenizer_files_with_sha256": [
+                e for e in manifest["files_with_sha256"] if e["kind"] == "tokenizer"
+            ],
+            "config_files_with_sha256": [
+                e for e in manifest["files_with_sha256"] if e["kind"] == "config"
+            ],
+            "fetch_method": manifest["fetch_method"],
+            "upstream_license_compatibility_verified": True,
+        }
+    }
 ```
 
 ### B.4.5 datasets 経由でのデータ取得
@@ -445,8 +548,8 @@ ds = load_dataset(
 
 ```python
 # scripts/mcp_server/server.py
-from mcp.server import Server, NotificationOptions
-from mcp.server.models import InitializationOptions
+from mcp.server import Server
+from mcp.server.models import InitializationOptions, NotificationOptions
 import mcp.server.stdio
 import mcp.types as types
 from typing import Any
@@ -460,7 +563,9 @@ async def list_tools() -> list[types.Tool]:
             name="submit_training_job",
             description=(
                 "Submit a fine-tune job to the GPU cluster. "
-                "Requires L2+ agent tier and a valid training_job_approval.approval_record_id."
+                "Requires L2+ agent tier and a valid training_job_approval.approval_record_id. "
+                "NOTE: caller identity is derived from the transport session (mTLS peer cert / "
+                "verified OIDC token), NOT from any argument."
             ),
             inputSchema={
                 "type": "object",
@@ -468,16 +573,16 @@ async def list_tools() -> list[types.Tool]:
                     "skill_name": {"type": "string"},
                     "skill_version": {"type": "string"},
                     "approval_record_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                    "hp_range_snapshot_hash": {"type": "string"},
-                    "requester_pubkey": {"type": "string"},
+                    "hp_range_snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "job_payload_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                 },
-                "required": ["skill_name", "approval_record_id",
-                             "hp_range_snapshot_hash", "requester_pubkey"],
+                "required": ["skill_name", "skill_version", "approval_record_id",
+                             "hp_range_snapshot_hash", "job_payload_hash"],
             },
         ),
         types.Tool(
             name="run_inference",
-            description="Run inference on a trusted checkpoint (L1+).",
+            description="Run inference on a trusted checkpoint (L1+). URI scheme allowlist enforced.",
             inputSchema={"type": "object", "properties": {
                 "checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                 "input_batch_uri": {"type": "string"},
@@ -493,26 +598,51 @@ async def list_tools() -> list[types.Tool]:
     ]
 ```
 
+> [!IMPORTANT]
+> **`requester_pubkey` を入力スキーマに含めてはいけない**。呼び出し側自身が入力する識別子を信頼すると、L1 agent が「L3 の pubkey を書いた JSON」を送るだけで tier チェックを bypass できます。**caller identity は必ずトランスポート層（mTLS peer cert / 検証済み OIDC token / MCP session context）から取り、`arguments` からは取らない**。以下 B.5.3 の `_resolve_caller_context_from_transport()` はその実装です。
+
 ### B.5.3 tool dispatch と権限チェック
+
+> [!WARNING]
+> **caller identity は transport から取る**。以下のコードは MCP SDK の `RequestContext` から peer 情報を取り出す想定です（実装は transport 実装依存 — stdio では TLS が使えないので mTLS で HTTP/WS transport を使う、あるいは OIDC 検証を server 側で行う）。
 
 ```python
 # scripts/mcp_server/dispatch.py
-from mcp.server import Server
+from dataclasses import dataclass
 import mcp.types as types
+
+@dataclass
+class SubmitResult:
+    job_id: str
+    scheduler_ledger_entry_id: str
+    accepted_at_utc: str
+    def to_json(self) -> str:
+        import json, dataclasses
+        return json.dumps(dataclasses.asdict(self))
+
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    ctx = _resolve_caller_context(arguments.get("requester_pubkey"))
+    # 1. caller identity は transport から取る（arguments からは取らない）
+    ctx = _resolve_caller_context_from_transport()
     _enforce_tier_for_tool(name, ctx.agent_tier)     # B.5.4
 
     if name == "submit_training_job":
-        _require_non_agent_approval(arguments["approval_record_id"])   # B.5.5
+        # 2. approval → payload binding（Ch13 Gate1 core invariant）
+        _require_non_agent_approval(
+            approval_record_id=arguments["approval_record_id"],
+            skill_name=arguments["skill_name"],
+            skill_version=arguments["skill_version"],
+            job_payload_hash=arguments["job_payload_hash"],
+            hp_range_snapshot_hash=arguments["hp_range_snapshot_hash"],
+        )
         _log_audit_event(name, arguments, ctx)                         # B.5.6
-        result = _submit_to_scheduler(arguments)
+        result = _submit_to_scheduler(arguments, ctx)
         return [types.TextContent(type="text", text=result.to_json())]
 
     elif name == "run_inference":
         _verify_checkpoint_trust(arguments["checkpoint_sha256"])
+        _validate_uri_allowlist(arguments["input_batch_uri"])          # 下記
         _log_audit_event(name, arguments, ctx)
         result = _run_inference(arguments)
         return [types.TextContent(type="text", text=result.to_json())]
@@ -523,6 +653,24 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
     else:
         raise ValueError(f"unknown tool: {name}")
+
+
+# --- URI allowlist（SSRF / path traversal 防御）---
+_ALLOWED_URI_SCHEMES = {"s3", "gs", "abfs"}          # インハウス storage のみ
+_ALLOWED_BUCKET_PREFIXES = ("arim-inference-inputs/", "arim-lab-inputs/")
+
+def _validate_uri_allowlist(uri: str) -> None:
+    from urllib.parse import urlparse
+    parsed = urlparse(uri)
+    if parsed.scheme not in _ALLOWED_URI_SCHEMES:
+        raise PermissionError(f"scheme not allowed: {parsed.scheme}")
+    # path traversal 防御
+    if ".." in parsed.path.split("/"):
+        raise PermissionError("path traversal blocked")
+    # bucket / prefix allowlist
+    canonical = f"{parsed.netloc}{parsed.path}".lstrip("/")
+    if not any(canonical.startswith(p) for p in _ALLOWED_BUCKET_PREFIXES):
+        raise PermissionError(f"bucket/prefix not allowlisted: {canonical}")
 ```
 
 ### B.5.4 tool レベルでの train / infer 権限分離
@@ -537,6 +685,26 @@ class CallerContext:
     agent_tier: str              # "L1" | "L2" | "L3"
     is_human: bool
     org_scope: str               # "L-Self" | "L-Lab" | "L-Org" (Ch15)
+    transport_verified: bool     # mTLS/OIDC で確認済みか
+
+def _resolve_caller_context_from_transport() -> CallerContext:
+    """
+    caller identity をトランスポート層から取り出す。
+    - stdio: 起動 shell の環境変数 + peer PID 検証（限定的）
+    - HTTP/WS: mTLS peer certificate の subject DN、または OIDC access token を
+              MCP サーバ側の JWKS 検証で principal_id / tier を得る
+    - arguments 由来の identity は絶対に使わない
+    """
+    # 実装例（transport 実装依存、擬似コード）：
+    peer = _current_mcp_session_peer()          # SDK が提供 or transport 側 middleware
+    assert peer.verified, "peer identity not verified by transport"
+    return CallerContext(
+        principal_id=peer.subject_id,
+        agent_tier=peer.claims["agent_tier"],   # OIDC claim / cert extension
+        is_human=peer.claims["is_human"],
+        org_scope=peer.claims["org_scope"],
+        transport_verified=True,
+    )
 
 TOOL_MIN_TIER = {
     "submit_training_job":  "L2",   # 学習ジョブは L2 以上
@@ -550,8 +718,8 @@ def _enforce_tier_for_tool(tool_name: str, caller_tier: str) -> None:
     if required is None:
         raise PermissionError(f"tool not registered in authz table: {tool_name}")
     if required == "human_only":
-        # 呼び出し側に is_human が付いていなければ拒否（B.5.5 と併用）
-        raise PermissionError("gate approval must go through Human hook (B.5.5)")
+        # human_only は本サーバの MCP tool として露出させない（外部承認 UI 経由）
+        raise PermissionError("gate approval must go through external Human UI, not MCP")
     order = {"L1": 1, "L2": 2, "L3": 3}
     if order[caller_tier] < order[required]:
         raise PermissionError(
@@ -559,22 +727,37 @@ def _enforce_tier_for_tool(tool_name: str, caller_tier: str) -> None:
         )
 ```
 
-### B.5.5 Human 承認 hook（Gate1 の MCP 実装）
+### B.5.5 Human 承認 hook（Gate1 の MCP 実装、payload binding 込み）
+
+> [!IMPORTANT]
+> **approval を単に「存在する」で通してはいけない**。承認は「特定の skill + version + job payload + hp_range」に紐づくものであり、これらの hash 全てが承認記録側と一致することを確認しないと、benign job の承認を別 job で使い回す攻撃（approval replay）が成立します。**Ch13 Gate1 core invariant = payload binding**。
 
 ```python
 # scripts/mcp_server/human_gate.py
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
-def _require_non_agent_approval(approval_record_id: str) -> None:
+def _require_non_agent_approval(
+    approval_record_id: str,
+    skill_name: str,
+    skill_version: str,
+    job_payload_hash: str,
+    hp_range_snapshot_hash: str,
+) -> None:
     """
     第13章 Gate1 を MCP レベルで強制。
     - approval_record_id は 64-hex sha256（形式検証）
     - approval store から non-agent 承認済みかを取得
     - 期限内であること
+    - skill_name / skill_version / job_payload_hash / hp_range_snapshot_hash が
+      承認記録と全て一致すること（payload binding, Ch13 core invariant）
     """
-    assert re.fullmatch(r"[0-9a-f]{64}$", approval_record_id), \
-        "approval_record_id must be sha256 hex"
+    assert re.fullmatch(r"[0-9a-f]{64}", approval_record_id), \
+        "approval_record_id must be 64-hex sha256"
+    assert re.fullmatch(r"[0-9a-f]{64}", job_payload_hash), \
+        "job_payload_hash must be 64-hex sha256"
+    assert re.fullmatch(r"[0-9a-f]{64}", hp_range_snapshot_hash), \
+        "hp_range_snapshot_hash must be 64-hex sha256"
 
     record = _approval_store.get(approval_record_id)
     if record is None:
@@ -588,7 +771,25 @@ def _require_non_agent_approval(approval_record_id: str) -> None:
     if now > expiry:
         raise PermissionError(f"approval expired at {expiry}")
 
-    # 監査用: approval の payload_hash と現在のジョブ payload の一致を後段で照合
+    # ★ payload binding — Ch13 Gate1 の core invariant
+    if record["approved_skill_name"] != skill_name:
+        raise PermissionError(
+            f"skill_name mismatch: approved={record['approved_skill_name']}, got={skill_name}"
+        )
+    if record["approved_skill_version"] != skill_version:
+        raise PermissionError(
+            f"skill_version mismatch: approved={record['approved_skill_version']}, got={skill_version}"
+        )
+    if record["approved_payload_hash"] != job_payload_hash:
+        raise PermissionError(
+            "job_payload_hash mismatch — approval was for a different job payload "
+            "(approval replay prevented, Ch13 Gate1)"
+        )
+    if record["approved_hp_range_hash"] != hp_range_snapshot_hash:
+        raise PermissionError(
+            "hp_range_snapshot_hash mismatch — hp range differs from what was approved "
+            "(Ch4 approved_hp_range binding)"
+        )
 ```
 
 > [!TIP]
@@ -596,9 +797,14 @@ def _require_non_agent_approval(approval_record_id: str) -> None:
 
 ### B.5.6 監査 log と cross-reference
 
+> [!WARNING]
+> **`prev_hash` chain には TOCTOU race がある**。asyncio の並行 `call_tool` や multi-process デプロイで、2 つのエントリが同じ `prev_hash` を読んで両方 append すると chain が silently fork します。**必ずファイルロック（`fcntl.flock` LOCK_EX）または単一 writer タスクで直列化**してください。
+
 ```python
 # scripts/mcp_server/audit.py
-import hashlib, json
+import fcntl
+import hashlib
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -608,26 +814,39 @@ def _log_audit_event(tool_name: str, arguments: dict, ctx: "CallerContext") -> N
     """
     Ch14 §14.8 audit_result_provenance の元データを吐き出す。
     - append-only ファイル、prev_hash chain（tamper-evident）
-    - Ch14 cross_reference_findings 生成に使う 5 種類の ledger を stream
+    - fcntl.flock で read-prev + append の critical section を直列化
+    - Ch14 canonical: registry_hash_at_run_start を出す
     """
-    entry = {
+    entry_core = {
         "ts_utc": datetime.now(timezone.utc).isoformat(),
         "tool": tool_name,
         "principal_id": ctx.principal_id,
         "agent_tier": ctx.agent_tier,
         "is_human": ctx.is_human,
+        "transport_verified": ctx.transport_verified,
         "arguments_hash": hashlib.sha256(
             json.dumps(arguments, sort_keys=True).encode()
         ).hexdigest(),
         "server_version": _SERVER_VERSION,
-        "registry_hash_at_call": _current_registry_hash(),   # Ch14
+        "registry_hash_at_run_start": _current_registry_hash(),   # Ch14 canonical
+        "registry_version_at_run_start": _current_registry_version(),
     }
-    entry["prev_hash"] = _last_entry_hash(AUDIT_LOG)
-    entry["self_hash"] = hashlib.sha256(
-        json.dumps(entry, sort_keys=True).encode()
-    ).hexdigest()
+
+    AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
     with AUDIT_LOG.open("a") as f:
-        f.write(json.dumps(entry) + "\n")
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)          # 排他ロック
+        try:
+            # ロック取得後に prev_hash を読み直す（race 解消）
+            entry_core["prev_hash"] = _last_entry_hash(AUDIT_LOG)
+            entry_core["self_hash"] = hashlib.sha256(
+                json.dumps(entry_core, sort_keys=True).encode()
+            ).hexdigest()
+            f.write(json.dumps(entry_core) + "\n")
+            f.flush()
+            import os
+            os.fsync(f.fileno())
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 ```
 
 **5 種の外部 ledger（Ch14 canonical）と MCP tool の対応**：
@@ -646,6 +865,9 @@ def _log_audit_event(tool_name: str, arguments: dict, ctx: "CallerContext") -> N
 # scripts/mcp_server/__main__.py
 import asyncio
 import mcp.server.stdio
+from mcp.server.models import InitializationOptions, NotificationOptions
+
+from .server import server                       # B.5.2 で定義した Server
 
 async def main() -> None:
     async with mcp.server.stdio.stdio_server() as (read, write):
@@ -669,23 +891,53 @@ Client 側（agentic runner）は MCP プロトコルで tool を呼び出しま
 
 ### B.5.8 テスト観点
 
+**基本の正常系 / 認可系**：
+
 - [ ] `submit_training_job` に古い `approval_record_id`（期限切れ）を渡すと `PermissionError`
-- [ ] `submit_training_job` の payload_hash と approval の payload_hash が一致しない場合に拒否
+- [ ] `submit_training_job` の `job_payload_hash` と approval の `approved_payload_hash` が一致しない場合に拒否（**approval replay 防止 / Blocking-2 対応**）
+- [ ] `submit_training_job` の `hp_range_snapshot_hash` と approval の `approved_hp_range_hash` が一致しない場合に拒否
+- [ ] approval の `approved_skill_name` / `approved_skill_version` と一致しない場合に拒否
 - [ ] L1 agent が `submit_training_job` を呼ぶと `PermissionError`
 - [ ] `run_inference` に未登録 `checkpoint_sha256` を渡すと拒否
-- [ ] audit log が append-only（`chattr +a`）、prev_hash chain が壊れた場合に検知
-- [ ] agent が `approve_gate` 相当を偽装できない（tier で塞ぐ）
+
+**トランスポート識別のなりすまし系（Blocking-1 対応）**：
+
+- [ ] Client が JSON に細工した `requester_pubkey` / `agent_tier` を含めても、`_resolve_caller_context_from_transport()` の結果が優先され、`arguments` 由来の identity は完全に無視される
+- [ ] transport 検証に失敗した peer（自己署名 cert, 期限切れ OIDC token）が呼ぶと全 tool で拒否
+- [ ] L1 client が `submit_training_job` の tool 名だけを偽装しても tier チェックで塞がれる
+
+**URI allowlist（Non-Blocking-10 対応）**：
+
+- [ ] `run_inference` に `file:///etc/passwd` を渡すと拒否
+- [ ] `run_inference` に `s3://other-tenant/xxx` を渡すと bucket prefix allowlist で拒否
+- [ ] `../` を含む path を渡すと拒否
+
+**Audit log 並行 append race（Non-Blocking-6 対応）**：
+
+- [ ] N 並列 `call_tool` を発行して audit log entry が N 個生成され、`prev_hash` chain が単一列として完全であること（fork なし）
+- [ ] flock を無効化した control 実装では chain fork が検出できることを確認（テストで実装のガードを検証）
+- [ ] audit log を後から編集すると `self_hash` 再計算で検知される
+
+**FM 取得（B.4 の Blocking-3 対応）**：
+
+- [ ] manifest の `tokenizer.json` sha256 を 1 bit 変えて配置すると `load_verified_fm` が拒否
+- [ ] `config.json` を差し替えると拒否
+- [ ] `files_with_sha256` に `weights` / `tokenizer` / `config` の 3 kind すべてが揃っていないと拒否
+- [ ] `revision` が短縮 SHA / tag 名の場合に `verify_revision` が拒否
 
 ---
 
 ## B.6 まとめ
 
-- **PyTorch / JAX の決定論設定**は起動時 1 回で終わらせ、provenance に 7 項目（seed, worker seed, cudnn_deterministic 等）を必ず記録
+- **PyTorch / JAX の決定論設定**は起動時 1 回で終わらせ、provenance に 7 項目（seed, worker seed, cudnn_deterministic 等）を必ず記録。`CUBLAS_WORKSPACE_CONFIG` は **`import torch` より前**に launcher で export
+- **PyTorch 2.x では `torch.amp.*`** を使う（`torch.cuda.amp.*` は deprecated）
 - **DataLoader worker のシード伝播**が抜けると Ch14 DG-08 に該当
-- **Hugging Face から FM を取得**する場合は `40-hex revision` + `HfApi resolved sha` + `snapshot_download(allow_patterns)` + `file-level sha256` + `safetensors のみ` の 5 点セットが最小
+- **Hugging Face から FM を取得**する場合は `40-hex revision` + `HfApi resolved sha` + `snapshot_download(allow_patterns)` + `weights + tokenizer + config` を全て file-level sha256 で検証 + `safetensors のみ` の 5 点セットが最小
+- **`huggingface_hub.login()` は避ける**（`~/.cache/huggingface/token` に書き出す）。`token=os.environ["HF_TOKEN"]` を個別 API に直接渡す
 - **MCP サーバ**は組織内の「特に権限を要する能力」を集約する場所として設計する。tool 名で train / infer / metadata を明確に分け、tier 制約を authz テーブルで宣言的に管理
-- **Human 承認 hook** は MCP tool の入口に置き、UI 手続きは外部委譲。「承認記録の検証」と「承認手続き」を混ぜない
-- **audit log** は tamper-evident（append-only + prev_hash chain）にし、5 種の ledger を Ch14 cross-reference の元データにする
+- **caller identity は transport から取る**（arguments 由来の pubkey は絶対に信頼しない）
+- **Human 承認 hook** は MCP tool の入口に置き、UI 手続きは外部委譲。**承認は skill_name + version + payload_hash + hp_range_hash に binding**（approval replay 防止、Ch13 Gate1 core invariant）
+- **audit log** は tamper-evident（append-only + prev_hash chain + `fcntl.flock`）にし、5 種の ledger を Ch14 cross-reference の元データにする
 
 ## 参考資料
 

@@ -108,13 +108,40 @@ import torch.nn as nn
 from typing import Callable
 
 
-def _spearman_correlation(a: torch.Tensor, b: torch.Tensor) -> float:
-    """attribution map 2 つのランク相関。値が 0 に近いほど「独立」= sanity check 合格。"""
-    a_rank = a.flatten().argsort().argsort().float()
-    b_rank = b.flatten().argsort().argsort().float()
+def _spearman_correlation(a: torch.Tensor, b: torch.Tensor) -> dict:
+    """
+    Tie-aware Spearman rank correlation between two flattened attribution maps.
+    return:
+      rho: float or NaN
+      valid: bool  (False if either input is degenerate: too few unique values or ~0 variance)
+    Saliency maps の類似度としては **abs(rho)** を使うこと（符号反転も依存性を意味しうる）。
+    """
+    import numpy as np
+    a_np = a.detach().cpu().numpy().ravel().astype(np.float64)
+    b_np = b.detach().cpu().numpy().ravel().astype(np.float64)
+
+    # degenerate 検出：unique value 数が極端に少ないか std がほぼ 0 のマップは信頼できない
+    def _degenerate(x):
+        return len(np.unique(x)) < 10 or x.std() < 1e-8
+    if _degenerate(a_np) or _degenerate(b_np):
+        return {"rho": float("nan"), "valid": False, "reason": "degenerate_map"}
+
+    # scipy が利用可能なら scipy.stats.spearmanr（tie 対応）。ここでは numpy でランク平均で代替。
+    try:
+        from scipy.stats import rankdata
+        a_rank = rankdata(a_np, method="average")
+        b_rank = rankdata(b_np, method="average")
+    except ImportError:
+        a_rank = a_np.argsort().argsort().astype(np.float64)
+        b_rank = b_np.argsort().argsort().astype(np.float64)
+
     a_c = a_rank - a_rank.mean()
     b_c = b_rank - b_rank.mean()
-    return float((a_c * b_c).sum() / (a_c.norm() * b_c.norm() + 1e-12))
+    denom = np.linalg.norm(a_c) * np.linalg.norm(b_c)
+    if denom < 1e-12:
+        return {"rho": float("nan"), "valid": False, "reason": "zero_variance"}
+    rho = float((a_c * b_c).sum() / denom)
+    return {"rho": rho, "valid": True, "reason": None}
 
 
 def model_randomization_test(
@@ -126,27 +153,53 @@ def model_randomization_test(
 ) -> dict:
     """
     元モデルの attribution と、指定層をランダム化したモデルの attribution を比較。
+    重要：
+      - GPU parameter には GPU 側 generator を使う（device 不一致回避）
+      - BatchNorm running stats 等の buffer もランダム化対象に含めるかを契約で明示
+      - サニティ判定は abs(rho) を使う（符号反転も saliency の依存性として扱う）
     return:
-      original_attribution, randomized_attribution, similarity, pass (< threshold)
+      original_attribution, randomized_attribution, similarity, pass
+      randomized_layer_names, randomized_buffer_names, seed
     """
     original_attr = attribution_fn(model, x).detach()
 
     randomized_model = copy.deepcopy(model)
-    g = torch.Generator(device="cpu").manual_seed(seed)
+    randomized_params: list[str] = []
+    randomized_buffers: list[str] = []
+
+    def _gen_for(device):
+        g = torch.Generator(device=device)
+        g.manual_seed(seed)
+        return g
+
     with torch.no_grad():
         for name, p in randomized_model.named_parameters():
             if any(name.startswith(prefix) for prefix in layers_to_randomize):
+                g = _gen_for(p.device)
                 p.copy_(torch.empty_like(p).normal_(generator=g))
+                randomized_params.append(name)
+        # BatchNorm 等の running stats（buffer）もランダム化対象に含める
+        for name, buf in randomized_model.named_buffers():
+            if any(name.startswith(prefix) for prefix in layers_to_randomize):
+                if buf.dtype.is_floating_point and buf.numel() > 0:
+                    g = _gen_for(buf.device)
+                    buf.copy_(torch.empty_like(buf).normal_(generator=g))
+                    randomized_buffers.append(name)
 
     randomized_attr = attribution_fn(randomized_model, x).detach()
-    similarity = _spearman_correlation(original_attr, randomized_attr)
+    sim = _spearman_correlation(original_attr, randomized_attr)
+    similarity_abs = abs(sim["rho"]) if sim["valid"] else float("nan")
 
     return {
         "original_attribution": original_attr,
         "randomized_attribution": randomized_attr,
-        "spearman_similarity": similarity,
-        "pass": similarity < 0.3,        # attribution 手法・タスク依存で閾値は要校正
-        "randomized_layers": layers_to_randomize,
+        "spearman_similarity": sim["rho"],
+        "spearman_similarity_abs": similarity_abs,
+        "similarity_valid": sim["valid"],
+        "invalid_reason": sim["reason"],
+        "pass": bool(sim["valid"] and similarity_abs < 0.3),
+        "randomized_params": randomized_params,
+        "randomized_buffers": randomized_buffers,
         "seed": seed,
     }
 ```
@@ -171,8 +224,15 @@ tests:
     strategy: "top_down_layer_by_layer"
     trend_expected: "monotonic_decrease"
   - name: "data_randomization"
-    procedure: "retrain_with_shuffled_labels_short_epochs"
-    similarity_max: 0.3
+    procedure: "retrain_with_shuffled_labels_to_fit_criterion"
+    fit_criterion:
+      train_loss_ratio_max: 1.5              # 元モデルの train loss × 1.5 以下まで学習させる
+                                             # （"short epochs" だと単にアンダーフィットで sanity check 無効）
+      min_epochs_fraction: 0.5               # 少なくとも元モデル epoch の 50%
+    similarity_max: 0.3                      # |rho| で判定
+  - name: "buffer_randomization_required"
+    include_running_stats: true              # BatchNorm running_mean/var も randomization 対象
+    documented_in_provenance: true
 
 acceptance:
   all_tests_must_pass: true
@@ -229,8 +289,8 @@ def feature_attribution(
 
     重要：
       - CNN 以外に grad_cam を要求されたら fatal（§10.3 warning）
+      - target_class が None なら決定論的 forward で argmax を解決し、provenance に必ず記録
       - IG baseline の選択は結果に大きく影響するため provenance に必ず記録
-      - 実行前に model.eval() + no_grad で目的 class の logit を確認
     """
     assert isinstance(model, nn.Module)
     _validate_method_vs_architecture(model, req)
@@ -238,30 +298,68 @@ def feature_attribution(
     prev_training = model.training
     model.eval()
     try:
-        if req.method == "grad_cam":
-            attribution = _grad_cam(model, x, req)
-        elif req.method == "integrated_gradients":
-            attribution = _integrated_gradients(model, x, req)
+        # target_class を **決定論的に** 解決してから provenance に固定
+        with torch.no_grad():
+            logits = model(x)
+            probs = logits.softmax(-1)
+        resolved_target_class = int(logits.argmax(-1).flatten()[0].item()) \
+            if req.target_class is None else int(req.target_class)
+        logits_snapshot_hash = _hash_tensor(logits.detach())
+
+        req_resolved = AttributionRequest(**{**req.__dict__, "target_class": resolved_target_class})
+
+        if req_resolved.method == "grad_cam":
+            attribution = _grad_cam(model, x, req_resolved)
+        elif req_resolved.method == "integrated_gradients":
+            attribution = _integrated_gradients(model, x, req_resolved)
         else:  # shap_deep
-            attribution = _shap_deep(model, x, req)
+            attribution = _shap_deep(model, x, req_resolved)
     finally:
         model.train(prev_training)
 
     return {
-        "method": req.method,
-        "target_class": req.target_class,
+        "method": req_resolved.method,
+        "target_class": resolved_target_class,           # 必ず int 値で記録
+        "target_class_was_auto_resolved": req.target_class is None,
+        "logits_snapshot_hash": logits_snapshot_hash,
+        "probs_top1": float(probs.max(-1).values.flatten()[0].item()),
         "attribution": attribution.detach(),
         "attribution_hash": _hash_tensor(attribution),
-        "request_params": req.__dict__,
+        "request_params": req_resolved.__dict__,
     }
 
 
+# アーキテクチャ ↔ 手法の許容関係を明示レジストリ化。
+# ここに列挙されないアーキテクチャで grad_cam を要求すると fatal。
+_GRAD_CAM_ALLOWED_ARCHITECTURES = {"resnet", "vgg", "densenet", "efficientnet", "convnext"}
+_GRAD_CAM_FORBIDDEN_ARCHITECTURES = {"vit", "swin", "deit", "beit", "mlp_mixer"}
+
+
 def _validate_method_vs_architecture(model: nn.Module, req: AttributionRequest) -> None:
-    """CNN 以外に grad_cam / Transformer に generic Grad-CAM は fatal。"""
+    """
+    Grad-CAM は「Conv があれば OK」ではない：ViT の patch embedding は Conv だが不適。
+    以下を fatal:
+      - モデル系統が forbidden リストにある
+      - grad_cam_target_layer が未指定
+      - 指定された target_layer が model に存在しない、または spatial feature 層でない
+    Transformer 系は Transformer-specific attribution（attention rollout 等）を使うこと。
+    """
+    arch_hint = getattr(model, "architecture_family", None)  # モデルが自己申告する場合
     if req.method == "grad_cam":
+        if arch_hint is not None and arch_hint in _GRAD_CAM_FORBIDDEN_ARCHITECTURES:
+            raise AssertionError(
+                f"grad_cam is forbidden for {arch_hint}; "
+                "use Transformer-specific attribution (attention rollout / TransCAM) instead"
+            )
         has_conv = any(isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Conv3d)) for m in model.modules())
         assert has_conv, "grad_cam requires a model containing Conv layers (§10.3)"
         assert req.grad_cam_target_layer is not None, "grad_cam_target_layer must be specified"
+
+        # target_layer が実在し、spatial 出力を持つ層であることを確認
+        target = dict(model.named_modules()).get(req.grad_cam_target_layer)
+        assert target is not None, f"grad_cam_target_layer '{req.grad_cam_target_layer}' not found in model"
+        assert isinstance(target, (nn.Conv1d, nn.Conv2d, nn.Conv3d, nn.BatchNorm2d, nn.ReLU, nn.Sequential)), \
+            f"grad_cam_target_layer '{req.grad_cam_target_layer}' is not a spatial feature layer"
 ```
 
 ### 契約 YAML
@@ -282,7 +380,16 @@ parameters:
     options: ["grad_cam", "integrated_gradients", "shap_deep"]
   ig_baseline:
     default: "zero"
+    options: ["zero", "blur", "uniform_noise", "domain_specific"]
     documented_impact: "baseline choice materially affects IG magnitude"
+    provenance_required:
+      - "baseline_type"
+      - "baseline_seed_if_stochastic"          # uniform_noise / blur random seed
+      - "baseline_tensor_hash"                 # 実際に使った baseline の hash
+      - "input_normalization_domain"           # 例: "imagenet_mean_std", "spectrum_minmax_0_1"
+      - "human_approved_rationale"             # zero が normalized data manifold 外にある場合の説明
+    warn_if:
+      zero_baseline_outside_data_manifold: true   # スペクトル min-max 正規化で zero が manifold 外
   ig_steps:
     default: 50
     min: 20
@@ -324,6 +431,45 @@ provenance:
 import numpy as np
 
 
+def assign_calibration_bins(
+    confidences: np.ndarray,
+    n_bins: int = 15,
+    strategy: str = "uniform",
+) -> dict:
+    """
+    ECE 計算と reliability diagram で **共有** する bin 割当関数。
+    - bin 定義は Ch8 と合わせて (lo, hi]（左開右閉）
+    - strategy="quantile" の場合、重複 edge を検出して effective bin 数を返す
+
+    Ch8 の ECE 関数もこの関数を呼び出すこと。両者が別実装だと bin 定義が食い違い、
+    Human 資料の数字が本文と合わなくなる。
+    """
+    if strategy == "uniform":
+        bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
+        duplicate_edges = 0
+    else:  # quantile
+        raw_edges = np.quantile(confidences, np.linspace(0.0, 1.0, n_bins + 1))
+        raw_edges[0], raw_edges[-1] = 0.0, 1.0
+        unique_edges = np.unique(raw_edges)
+        duplicate_edges = len(raw_edges) - len(unique_edges)
+        bin_edges = unique_edges
+    effective_n_bins = len(bin_edges) - 1
+
+    # (lo, hi] semantics: 各 conf c に対して最大の m で bin_edges[m] < c <= bin_edges[m+1]
+    # np.searchsorted(side="left") で bin_edges[m] < c を満たす最小 m を得て、-1 で境界に含める
+    bin_ids = np.searchsorted(bin_edges, confidences, side="left") - 1
+    bin_ids = np.clip(bin_ids, 0, effective_n_bins - 1)
+    # 完全一致で 0 になったもの（c == 0.0）は bin 0 に含める
+    return {
+        "bin_edges": bin_edges,
+        "bin_ids": bin_ids,
+        "effective_n_bins": effective_n_bins,
+        "duplicate_edges": duplicate_edges,
+        "strategy": strategy,
+        "inclusivity": "(lo, hi]",
+    }
+
+
 def reliability_diagram_data(
     probs: np.ndarray,               # (N, K) predicted probabilities
     labels: np.ndarray,              # (N,) true class indices
@@ -332,22 +478,25 @@ def reliability_diagram_data(
 ) -> dict:
     """
     bin ごとに (confidence_mean, accuracy, count) を返す。
-    第8章 ECE と bin 定義を揃えることが重要（Human 資料の数字の一致）。
+    第8章 ECE と bin 定義を共有（assign_calibration_bins 経由）。
     """
     predictions = probs.argmax(-1)
     confidences = probs.max(-1)
     correct = (predictions == labels).astype(np.float32)
 
-    if strategy == "uniform":
-        bin_edges = np.linspace(0.0, 1.0, n_bins + 1)
-    else:
-        bin_edges = np.quantile(confidences, np.linspace(0.0, 1.0, n_bins + 1))
-        bin_edges[0], bin_edges[-1] = 0.0, 1.0
+    binning = assign_calibration_bins(confidences, n_bins=n_bins, strategy=strategy)
+    bin_edges = binning["bin_edges"]
+    bin_ids = binning["bin_ids"]
+    effective_n_bins = binning["effective_n_bins"]
 
-    bin_ids = np.clip(np.digitize(confidences, bin_edges) - 1, 0, n_bins - 1)
-
-    out = {"bin_low": [], "bin_high": [], "conf_mean": [], "accuracy": [], "count": []}
-    for m in range(n_bins):
+    out = {
+        "bin_low": [], "bin_high": [], "conf_mean": [], "accuracy": [], "count": [],
+        "strategy": strategy,
+        "effective_n_bins": effective_n_bins,
+        "duplicate_edges": binning["duplicate_edges"],
+        "inclusivity": binning["inclusivity"],
+    }
+    for m in range(effective_n_bins):
         mask = bin_ids == m
         n_m = int(mask.sum())
         out["bin_low"].append(float(bin_edges[m]))
@@ -371,7 +520,7 @@ reliability diagram は以下 3 情報を必ず併記：
 - **temperature scaling 前後**（§8.5）— 校正の効果を Human に示す
 
 > [!TIP]
-> **reliability diagram を Human に見せるだけでは不十分**です。「diagonal から離れている = miscalibrated」を口頭で説明する Skill が別途必要。`deep_report_template` §10.9 で「reliability diagram → 3 文の自動解釈」を組み込みます。
+> **reliability diagram を Human に見せるだけでは不十分**です。「diagonal から離れている = miscalibrated」を口頭で説明する Skill が別途必要。`deep_report_template` §10.8 で「reliability diagram → 3 文の自動解釈」を組み込みます。
 
 ---
 
@@ -393,51 +542,80 @@ trigger:
 
 human_ui_required_fields:
   # Human が「見て・判断できる」ための最小構成
-  - "sample_id"
-  - "raw_input_view"                              # 画像なら thumbnail、スペクトルなら plot
-  - "predicted_class_with_top_k_probabilities"    # k=5 程度
-  - "predictive_entropy_normalized"
-  - "mutual_information"
-  - "max_softmax_uncertainty"
-  - "domain_gap_score"                            # Ch7 との連動
-  - "attribution_map"                             # §10.5 の grad_cam 等
-  - "attribution_sanity_check_result"             # §10.4 の pass/fail と類似度
-  - "nearest_training_samples"                    # k=5、Human が「似たサンプルはこう分類された」を確認
-  - "recent_calibration_diagram_ref"              # §10.6
-  - "model_version_and_provenance_summary"
-  - "triggered_gate_names_and_thresholds"
+  always_shown:
+    - "sample_id"
+    - "raw_input_view"                              # 画像なら thumbnail、スペクトルなら plot
+    - "predicted_class_with_top_k_probabilities"    # k=5 程度
+    - "predictive_entropy_normalized"
+    - "mutual_information"
+    - "max_softmax_uncertainty"
+    - "domain_gap_score"                            # Ch7 との連動
+    - "attribution_sanity_check_result"             # §10.4 の pass/fail と類似度
+    - "nearest_training_samples"                    # k=5、Human が「似たサンプルはこう分類された」を確認
+    - "recent_calibration_diagram_ref"              # §10.6
+    - "model_version_and_provenance_summary"
+    - "triggered_gate_names_and_thresholds"
+  shown_only_if_sanity_pass:
+    - "attribution_map"                             # §10.5 の grad_cam 等
+  shown_only_if_sanity_fail:
+    - "attribution_hidden_reason"                   # 例: "spearman |rho| = 0.42 > 0.3"
+    - "sanity_fail_summary"                         # どのテストで fail、similarity score
 
 human_actions_allowed:
-  - approve_prediction                            # 予測が正しい
-  - correct_label                                 # 別のラベルに修正
-  - reject_sample                                 # このサンプルは学習に使わない
-  - request_more_info                             # queue に戻して別 Human に回す
-  - flag_for_model_retraining                     # L3 承認ワークフローへ
+  - approve_prediction                              # 予測が正しい
+  - correct_label                                   # 別のラベルに修正（下記 required_fields_for 参照）
+  - reject_sample                                   # このサンプルは学習に使わない
+  - request_more_info                               # queue に戻して別 Human に回す
+  - flag_for_model_retraining                       # L3 承認ワークフローへ
+
+required_fields_for:
+  correct_label:                                    # append-only, 学習データ即時変更は禁止
+    - "corrected_label"                             # 修正後のラベル
+    - "label_ontology_version"
+    - "reviewer_confidence"                         # low | medium | high
+    - "rationale_free_text"
+    - "proposal_only_flag: true"                    # データ即時 mutation は不可
+                                                    # 学習データ反映は curator/L3 承認を経由
 
 acceptance:
-  human_must_view_attribution_and_sanity_check: true  # UI で表示済みかログで検証
-  human_review_time_min_seconds: 5                    # あまりに短いレビューは無効化
-  attribution_hallucinating_samples_must_be_flagged: true  # sanity check fail サンプルは
-                                                          # attribution を表示せず uncertainty のみ提示
+  attribution_map_shown_iff_sanity_pass: true       # pass 時のみ表示、fail 時は非表示
+  hallucinating_samples_must_be_flagged: true      # sanity fail サンプルは attribution を表示せず uncertainty のみ提示
+  human_must_view_uncertainty_and_sanity_result: true  # UI で表示済みかログで検証
+  review_duration_used_as_qc_signal_only: true     # 短時間 review は「監査 QC 信号」であり自動無効化条件ではない
+                                                    # random audit sampling で品質チェック
+  required_view_events_logged: true                # どのフィールドを表示・スクロールしたかログ
 
 agent_authorization:
   L1: "prepare_ui_and_wait_for_human"
-  L2: "prepare_ui_and_apply_human_decision"
-  L3: "same_as_L2 + trigger_retraining_after_approval"
+  L2:
+    action: "prepare_ui_and_record_human_decision_append_only"
+    forbidden: "directly_mutating_training_data_or_labels"      # curate/L3 承認経由のみ
+  L3:
+    action: "same_as_L2 + trigger_retraining_after_separate_curator_approval"
+    forbidden: "auto_apply_correct_label_to_training_set_without_curator_sign_off"
   never_allowed:
     - "auto_approve_without_human"                # Ch4 §4.7 の absolute rule
     - "modify_human_review_record_after_write"    # 監査要件
+    - "reduce_ui_snapshot_hash_scope"             # 表示内容の改ざん不可性
 
 provenance:
   layer_human_review:                             # 拡張ブロック
     human_reviewer_id_hashed: true
     review_timestamp: true
     ui_snapshot_hash: true                        # 何を見せたかの改ざん不可性
-    displayed_attribution_hash: true
+    displayed_attribution_hash_or_null: true      # sanity fail 時は null
+    attribution_display_state: "shown | hidden_due_to_sanity_fail"
     displayed_sanity_check_result: true
+    displayed_field_view_events: true             # スクロール・focus ログで required 表示を検証
     human_action_selected: "one of human_actions_allowed"
+    correct_label_payload_if_any:                 # correct_label 選択時のみ
+      corrected_label: true
+      label_ontology_version: true
+      reviewer_confidence: true
+      rationale_free_text: true
+      proposal_only_flag: true
     human_free_text_comment_optional: true
-    review_duration_seconds: true
+    review_duration_seconds: true                 # QC 信号（自動無効化には使わない）
     subsequent_agent_action_ref: "id"
 ```
 
@@ -586,17 +764,31 @@ def generate_deep_report(
     provenance_bundle: dict,   # Ch4-9 の provenance を全て含む
     attribution_bundle: dict,  # §10.5-10.7 の attribution artifacts
     human_review_bundle: dict, # §10.7 の Human 判定ログ
+    previous_report_hash: str | None,
+    renderer_version: str,
     output_format: str = "html",
 ) -> str:
+    # 全 bundle と renderer をカバーする **report manifest** を先に構築し、hash chain の根とする
+    manifest = {
+        "provenance_bundle_hash": _hash_content(provenance_bundle),
+        "attribution_bundle_hash": _hash_content(attribution_bundle),
+        "human_review_bundle_hash": _hash_content(human_review_bundle),
+        "previous_report_hash": previous_report_hash,
+        "renderer_version": renderer_version,
+    }
+    manifest_hash = _hash_content(manifest)
+
     _assert_all_required_sections_present(provenance_bundle, attribution_bundle, human_review_bundle)
     _assert_hash_chain_valid(provenance_bundle)
+    _assert_attribution_artifact_hashes_match(attribution_bundle)   # UI snapshot と保存物の一致
+    _assert_ui_snapshot_hashes_present(human_review_bundle)         # 全レビューに snapshot hash
     _assert_no_agent_auth_violation(provenance_bundle)
 
     body = _render_sections(provenance_bundle, attribution_bundle, human_review_bundle)
-    narrative = _generate_narrative_3_sentences_per_topic(body)
-    report = _compose(body, narrative, output_format)
-    report_hash = _hash_content(report)
-    _register_in_immutable_store(report, report_hash)
+    narrative = _generate_narrative_3_sentences_per_topic(body)      # slot-fill 固定テンプレート
+    report = _compose(body, narrative, manifest, output_format)
+    report_root_hash = _hash_content((report, manifest_hash))
+    _register_in_immutable_store(report, manifest, report_root_hash)
     return report
 ```
 
@@ -619,21 +811,32 @@ version: "1.0.0"
 monitors:
   - name: "calibration_drift"
     metric: "weekly_ece"
-    baseline: "training_time_ece"
+    baseline: "rolling_reference_ece_last_4_weeks_pre_deployment"   # training-time 単発ではなく rolling window
     alert_relative_increase: 0.5            # ベースライン比 +50% で alert
+    min_samples_per_window: 200             # サンプル数不足時は alert 抑止
+    confidence_interval: "bootstrap_95pct"  # 単点比較ではなく CI で判定
+    stratify_by: ["instrument", "class"]    # 全体は OK でも装置別/クラス別にズレがないか
+    delayed_label_policy: "wait_up_to_14_days_then_compute"
 
   - name: "human_correct_label_rate_spike"
     metric: "correct_label_count / handback_count"
     window: "rolling_7_days"
     alert_threshold_absolute: 0.3           # 30% 以上が correct_label なら alert
+    min_handbacks_in_window: 30             # 分母が小さいときは alert 抑止
+    denominator_zero_behavior: "no_alert"
+    stratify_by: ["reviewer_cohort", "class"]
 
   - name: "attribution_sanity_check_fail_rate_spike"
     metric: "sanity_fail_count / total_attributions"
     alert_threshold: 0.2                    # 20% 以上失敗で alert
+    min_samples_per_window: 100
+    stratify_by: ["method"]                 # grad_cam / IG / shap 別
 
   - name: "gate_stop_rate_spike"
     metric: "uncertainty_stop_gate_activation / total_predictions"
     alert_relative_increase: 1.0            # 倍以上で alert
+    min_predictions_per_window: 500
+    stratify_by: ["instrument"]
 
 on_alert:
   - notify_human
@@ -644,7 +847,13 @@ on_alert:
 agent_authorization:
   L1: "read_only"
   L2: "read_only"
-  L3: "adjust_thresholds_with_prior_approval"
+  L3:
+    can_adjust: "monitor_alert_thresholds_with_prior_approval_and_appended_change_log"
+    cannot_adjust:                            # Ch8 gate 閾値は全レベル不可（Ch8 §8.9 継承）
+      - "uncertainty_stop_gate_thresholds"
+      - "domain_gap_gate_thresholds"          # Ch7 §7.5 継承
+      - "attribution_sanity_check_similarity_thresholds"   # §10.4 継承
+    cannot_use_threshold_change_to_clear_active_alert: true  # alert を隠すための閾値変更禁止
 ```
 
 ---

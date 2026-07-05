@@ -1,0 +1,713 @@
+# 付録B　PyTorch / JAX / Hugging Face チートシートと MCP サーバ実装
+
+> **本付録の目的**：第4-15章で頻出する PyTorch / JAX (Flax) / Hugging Face の API を **Agentic Skill の provenance・承認ゲート要件**と紐付けたチートシートにまとめ、続いて **MCP (Model Context Protocol) サーバ Python SDK による組織内サーバの最小実装**を提示します。vol-02 §15 で「MCP を作るべきかどうか」の判断基準までを扱ったのに対し、本付録は「作ると決めた後に、Agentic 承認ゲートを MCP レベルで組み込む方法」を扱います。
+
+> [!IMPORTANT]
+> チートシートは「動くコード」の羅列ではなく、**「Skill が Agentic 契約を満たすために必要な API 呼び出しと provenance 記録」**の対応表です。全コードは第4章の agent tier / 第11章の FM 検証 / 第13章の Gate1-3 / 第14章の audit を **API レベルで満たす形**に揃えています。
+
+---
+
+## B.1 本付録の使い方
+
+| 目的 | 参照するセクション | 該当章 |
+|---|---|---|
+| 決定論的な学習ループを PyTorch で書く | B.2.1 - B.2.3 | 第4章・第14章 |
+| DataLoader worker のシード伝播を正しく行う | B.2.4 | 第14章 (DG-08) |
+| Mixed Precision / DDP を有効にしつつ再現性を保つ | B.2.5 - B.2.6 | 第14章 |
+| Checkpoint を append-only で保存 | B.2.7 | 第4章・付録A |
+| JAX / Flax で決定論的学習を書く | B.3 | 第6-9章 |
+| Hugging Face から FM を安全に取得する | B.4.1 - B.4.3 | 第11章 |
+| safetensors のみを許可する読み込みパスを組む | B.4.4 | 第11章 (AG-08) |
+| MCP サーバを組織内で最小構成で立てる | B.5.1 - B.5.3 | 第4章・vol-02 §15 |
+| MCP レベルで train / infer 権限を分離する | B.5.4 | 第4章 |
+| MCP に Human 承認 hook を組み込む | B.5.5 | 第13章 |
+| MCP サーバの provenance / audit 対応 | B.5.6 | 第14章 |
+
+> [!NOTE]
+> 本付録のコードは **PyTorch 2.x / JAX 0.4.x / transformers 4.35+ / huggingface_hub 0.20+ / mcp SDK 1.0+** を想定しています。バージョンは変わるため、実運用時は該当時点の公式ドキュメントで API 名称と署名を確認してください（変更が破壊的な場合は Skill の `framework_versions.*` を必ず provenance に記録）。
+
+---
+
+## B.2 PyTorch チートシート
+
+### B.2.1 決定論設定（起動時 1 回）
+
+```python
+# scripts/_deterministic_setup.py
+import os
+import random
+import numpy as np
+import torch
+
+def set_deterministic(seed: int) -> None:
+    """
+    第4章 §4.5 の再現性条件と Ch14 DG-08 (cuDNN 非決定性) 対策。
+    provenance には次の 7 項目を必ず記録：
+      - random_seed (vol-02)
+      - numpy_seed / python_hash_seed / random_seed_per_worker (vol-03)
+      - cudnn_deterministic / cudnn_benchmark / gpu_backend
+    """
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"   # torch.use_deterministic_algorithms 前提
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False               # true にすると非決定
+    torch.use_deterministic_algorithms(True, warn_only=False)
+```
+
+> [!WARNING]
+> `torch.use_deterministic_algorithms(True)` は一部の CUDA カーネル（`bmm`, `scatter_add` の一部）で例外を発生させます。回避策として `warn_only=True` を使うと再現性が失われるため、Skill 契約側で「決定論違反時は fail」と宣言し、`warn_only` は使わないのが基本です。
+
+### B.2.2 学習ループの最小骨格
+
+```python
+# scripts/train_loop.py
+from pathlib import Path
+import torch
+from torch.utils.data import DataLoader
+
+def train_epoch(model, loader, optimizer, loss_fn, device) -> dict:
+    model.train()
+    total_loss = 0.0
+    n = 0
+    for batch in loader:
+        x, y = batch["x"].to(device, non_blocking=True), batch["y"].to(device, non_blocking=True)
+        optimizer.zero_grad(set_to_none=True)
+        logits = model(x)
+        loss = loss_fn(logits, y)
+        loss.backward()
+        # gradient clipping は provenance に閾値を記録
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        total_loss += loss.item() * y.size(0)
+        n += y.size(0)
+    return {"train_loss": total_loss / max(n, 1)}
+```
+
+### B.2.3 検証ループ（不確かさ含む）
+
+```python
+@torch.no_grad()
+def evaluate(model, loader, device) -> dict:
+    model.eval()
+    all_probs, all_targets = [], []
+    for batch in loader:
+        x, y = batch["x"].to(device), batch["y"].to(device)
+        logits = model(x)
+        probs = torch.softmax(logits, dim=-1)
+        all_probs.append(probs)
+        all_targets.append(y)
+    probs = torch.cat(all_probs)
+    targets = torch.cat(all_targets)
+    # 予測エントロピー（total uncertainty）— provenance に記録
+    entropy = -(probs * probs.clamp(min=1e-12).log()).sum(-1).mean().item()
+    return {"probs": probs, "targets": targets, "predictive_entropy_mean": entropy}
+```
+
+### B.2.4 DataLoader worker のシード伝播
+
+```python
+# Ch14 DG-08：worker 内での numpy.random / random は再シードしないと非決定
+def _worker_init_fn(worker_id: int) -> None:
+    # torch.initial_seed() は worker ごとに一意な値を返す（seed + worker_id 由来）
+    base_seed = torch.initial_seed() % (2**32)
+    np.random.seed(base_seed)
+    random.seed(base_seed)
+
+loader = DataLoader(
+    dataset,
+    batch_size=32,
+    shuffle=True,
+    num_workers=4,
+    worker_init_fn=_worker_init_fn,
+    generator=torch.Generator().manual_seed(cfg["seed"]),
+    persistent_workers=True,        # プロセス再起動による初期化順変動を回避
+    pin_memory=True,
+)
+
+# provenance:
+#   random_seed_per_worker: True
+#   worker_init_fn_hash: sha256 of scripts/train_loop.py:_worker_init_fn
+```
+
+### B.2.5 Mixed Precision（AMP）と再現性の両立
+
+```python
+from torch.cuda.amp import autocast, GradScaler
+
+scaler = GradScaler()
+for batch in loader:
+    optimizer.zero_grad(set_to_none=True)
+    with autocast(dtype=torch.float16):     # bf16 の方が数値安定性が高い場合あり
+        logits = model(batch["x"].to(device))
+        loss = loss_fn(logits, batch["y"].to(device))
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    scaler.step(optimizer)
+    scaler.update()
+
+# provenance:
+#   mixed_precision: true
+#   amp_dtype: "float16 | bfloat16"
+#   grad_scaler_used: true
+#   note: fp16 は cudnn_deterministic=True でも
+#         reduction 順序で微小な数値差が出うる（1e-6 レベル）
+```
+
+### B.2.6 分散学習（DDP）の provenance
+
+```python
+# torchrun 起動：torchrun --nproc_per_node=4 scripts/train.py
+import torch.distributed as dist
+
+def setup_ddp() -> tuple[int, int]:
+    dist.init_process_group(backend="nccl")
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    torch.cuda.set_device(rank % torch.cuda.device_count())
+    return rank, world_size
+
+# provenance に必ず記録：
+#   ddp:
+#     world_size: <N>
+#     backend: "nccl"
+#     effective_batch_size: <batch_size * world_size>   # ロス曲線比較用
+#     all_reduce_algorithm: "ring | tree"                # NCCL_ALGO
+#     nccl_version: <str>
+#   注意: DDP は BatchNorm を全 rank で同期しない限り非決定。
+#         SyncBatchNorm or GroupNorm を使い、provenance に明記。
+```
+
+### B.2.7 Checkpoint（append-only + safetensors）
+
+```python
+# scripts/_checkpoint.py
+import hashlib, json, os
+from datetime import datetime, timezone
+from pathlib import Path
+from safetensors.torch import save_file
+
+def save_checkpoint(model, ckpt_dir: Path, epoch: int, metrics: dict,
+                    approval_record_id: str) -> Path:
+    """
+    Ch4 checkpoint_overwrite_policy: append_only の実装。
+    ファイル名にエポック番号を含め、既存ファイルへの上書きを拒否。
+    """
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    fpath = ckpt_dir / f"epoch_{epoch:03d}.safetensors"
+    if fpath.exists():
+        raise RuntimeError(f"AG-03 (silent overwrite) prevented: {fpath}")
+
+    save_file(model.state_dict(), str(fpath))
+
+    # append-only registry
+    sha = hashlib.sha256(fpath.read_bytes()).hexdigest()
+    entry = {
+        "epoch": epoch,
+        "path": fpath.name,
+        "sha256": sha,
+        "saved_at_utc": datetime.now(timezone.utc).isoformat(),
+        "approval_record_id": approval_record_id,       # Ch4 canonical
+        "metrics": metrics,
+    }
+    reg = ckpt_dir / "checkpoint_registry.jsonl"
+    with reg.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+    return fpath
+
+def mark_as_best(ckpt_dir: Path, epoch: int, signer_pubkey: str,
+                 signature: str) -> None:
+    """
+    「best」は上書きファイルではなく、不変 checkpoint への signed pointer。
+    """
+    reg = ckpt_dir / "checkpoint_registry.jsonl"
+    entry = {
+        "kind": "best_pointer",
+        "points_to": f"epoch_{epoch:03d}.safetensors",
+        "signer_pubkey": signer_pubkey,
+        "signature": signature,
+    }
+    with reg.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+```
+
+### B.2.8 主要 API 早見表
+
+| 目的 | API | provenance に記録すべき項目 |
+|---|---|---|
+| モデル構築（画像） | `timm.create_model(name, pretrained, num_classes)` | `model_architecture.name`, `parameter_count`, `parameter_count_trainable` |
+| Optimizer | `torch.optim.AdamW(params, lr, weight_decay)` | `optimizer`, `lr_schedule`, `weight_decay` |
+| Scheduler | `torch.optim.lr_scheduler.CosineAnnealingLR(...)` | `lr_schedule`（enum + 引数 hash） |
+| Loss（回帰・不確かさ） | `torch.nn.GaussianNLLLoss(reduction)` | `loss` |
+| データ拡張 | `torchvision.transforms.v2.*` or `albumentations` | `augmentation_provenance.policy_hash` |
+| 保存 | `safetensors.torch.save_file` | `weights_format: "safetensors"`, `weights_sha256` |
+| 読込 | `safetensors.torch.load_file` | 起動時 hash 検証 |
+
+---
+
+## B.3 JAX / Flax チートシート
+
+### B.3.1 決定論と PRNGKey 管理
+
+```python
+import jax
+import jax.numpy as jnp
+from flax import linen as nn
+
+# JAX は「毎回 PRNGKey を明示的に split する」ため決定論性が組み込み。
+# vol-03 では PRNGKey chain 全体を provenance に記録。
+key = jax.random.PRNGKey(seed=42)
+key, init_key, dropout_key, aug_key = jax.random.split(key, 4)
+
+# provenance:
+#   prng_seed: 42
+#   prng_key_split_chain_hash: sha256 of "42|init|dropout|aug"
+#   注意: JAX 側で "非決定" が入りうるのは XLA compilation のみ。
+#         xla_flags を provenance に記録。
+```
+
+### B.3.2 学習 step の pure function 化
+
+```python
+from flax.training import train_state
+import optax
+
+def create_state(rng, model, lr):
+    params = model.init(rng, jnp.ones((1, 224, 224, 3)))
+    tx = optax.adamw(learning_rate=lr, weight_decay=1e-4)
+    return train_state.TrainState.create(apply_fn=model.apply, params=params, tx=tx)
+
+@jax.jit
+def train_step(state, batch, dropout_rng):
+    def loss_fn(params):
+        logits = state.apply_fn(params, batch["x"], train=True,
+                                rngs={"dropout": dropout_rng})
+        loss = optax.softmax_cross_entropy_with_integer_labels(logits, batch["y"]).mean()
+        return loss, logits
+    (loss, logits), grads = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
+    return state.apply_gradients(grads=grads), {"loss": loss}
+```
+
+### B.3.3 pmap による multi-device 分散
+
+```python
+from flax.jax_utils import replicate, unreplicate
+
+state = replicate(state)                       # 各 device に複製
+p_train_step = jax.pmap(train_step, axis_name="batch")
+
+# provenance:
+#   distributed_backend: "jax_pmap"
+#   n_devices: jax.local_device_count()
+#   注意: pmap 内 all_reduce は `axis_name` で明示、
+#         全 rank BatchNorm 同期は `flax.linen.BatchNorm(use_running_average=..., axis_name="batch")`
+```
+
+### B.3.4 早見表
+
+| PyTorch | JAX / Flax |
+|---|---|
+| `torch.manual_seed(s)` | `jax.random.PRNGKey(s)` + `split` chain |
+| `nn.Dropout(p=0.5)` | `flax.linen.Dropout(rate=0.5, deterministic=not train)` |
+| `torch.optim.AdamW` | `optax.adamw` |
+| `torch.nn.functional.cross_entropy` | `optax.softmax_cross_entropy_with_integer_labels` |
+| `DataLoader(num_workers=N)` | `tf.data` or `grain` を JAX へ pipeline |
+| `DDP` | `pmap` + `pjit` (JAX 0.4+) |
+
+---
+
+## B.4 Hugging Face チートシート（Ch11 安全設計準拠）
+
+### B.4.1 認証トークンの取り扱い
+
+```python
+# 環境変数のみ許可、コード内 hardcode 禁止（Ch14 DG-11 対策）
+import os
+from huggingface_hub import login
+
+token = os.environ.get("HF_TOKEN")
+assert token is not None, "HF_TOKEN must be set via env, never hardcoded"
+login(token=token, add_to_git_credential=False)
+
+# provenance:
+#   hf_auth_method: "env_var"
+#   hf_token_scope_hash: sha256 of scope string (実トークンは書かない)
+```
+
+### B.4.2 revision pin + Hub resolved SHA 一致検証
+
+```python
+import re
+from huggingface_hub import HfApi
+
+def verify_revision(repo_id: str, revision: str) -> None:
+    # 1. 40-hex commit SHA のみ許容（tag / branch / 短縮 SHA 全禁止）
+    assert re.fullmatch(r"[0-9a-f]{40}", revision), \
+        f"revision must be 40-hex commit sha, got: {revision}"
+    # 2. Hub API の resolved sha と一致
+    api = HfApi()
+    info = api.model_info(repo_id=repo_id, revision=revision)
+    assert info.sha == revision, \
+        f"hub resolved sha ({info.sha}) != approved revision ({revision})"
+```
+
+### B.4.3 snapshot_download で allow_patterns を絞る
+
+```python
+from huggingface_hub import snapshot_download
+
+local_dir = snapshot_download(
+    repo_id=repo_id,
+    revision=revision,
+    allow_patterns=[
+        "*.safetensors",
+        "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json",
+        "config.json", "generation_config.json",
+    ],
+    # ignore_patterns で pickle / .bin / .msgpack を明示除外
+    ignore_patterns=["*.bin", "*.msgpack", "*.h5", "*.pkl", "*.pt"],
+)
+```
+
+### B.4.4 safetensors のみを許可するロードパス
+
+```python
+import hashlib
+from pathlib import Path
+from transformers import AutoModel, AutoTokenizer
+
+def load_verified_fm(local_dir: str, manifest: dict):
+    """
+    manifest: 承認済み manifest（Ch11 §11.4）
+      - safetensors_files_with_sha256: [{file, sha256}, ...]
+      - declared_license, pretraining_data_license, model_family
+    """
+    # 1. file-level sha256 を全ファイルで照合
+    for entry in manifest["safetensors_files_with_sha256"]:
+        p = Path(local_dir) / entry["file"]
+        h = hashlib.sha256(p.read_bytes()).hexdigest()
+        assert h == entry["sha256"], f"hash mismatch: {entry['file']}"
+
+    # 2. safetensors 経路でロード（pickle 経路を明示遮断）
+    model = AutoModel.from_pretrained(local_dir, use_safetensors=True)
+    tokenizer = AutoTokenizer.from_pretrained(local_dir)
+    return model, tokenizer
+```
+
+### B.4.5 datasets 経由でのデータ取得
+
+```python
+from datasets import load_dataset
+
+# revision（コミット SHA）を必ず pin
+ds = load_dataset(
+    "some-org/some-dataset",
+    revision="<40-hex sha>",
+    split="train",
+    token=os.environ["HF_TOKEN"],
+    trust_remote_code=False,          # 任意コード実行を禁止（Ch14 DG-11）
+)
+
+# provenance:
+#   dataset_repo_id: "some-org/some-dataset"
+#   dataset_revision: "<40-hex sha>"
+#   trust_remote_code: false
+#   dataset_size_bytes: sum of parquet files
+#   dataset_license: from dataset card
+```
+
+---
+
+## B.5 MCP サーバ実装（Python SDK 版）
+
+> [!IMPORTANT]
+> **MCP サーバは Skill から呼ばれる能力の中で「特に権限を要する部分」を集約する場所**です。ここに承認ゲート・監査 hook・機密資源への窓口を集中させると、Ch4 の agent tier 制御が **API レベルで実装**できます。vol-02 §15 で「作るべきかどうか」を判断した後、本節はその実装編にあたります。
+
+### B.5.1 対象範囲と非対象
+
+**対象**：
+- 組織内 GPU クラスタ / MLflow / DVC / データレイクへの窓口を MCP サーバ 1 個に集約
+- Train / Infer / Metadata の 3 権限を tool レベルで分離
+- Human 承認 hook を tool 呼び出し前に差し込む
+- Ch14 監査に必要な cross_reference log を出力
+
+**非対象**（本書では扱わない）：
+- MCP transport（stdio / HTTP / WebSocket）の詳細プロトコル
+- 認証（SSO / OAuth）連携の全体像 — mTLS / OIDC など既存基盤に委譲
+- 高可用性・水平スケールの実装
+
+### B.5.2 最小サーバ骨格
+
+```python
+# scripts/mcp_server/server.py
+from mcp.server import Server, NotificationOptions
+from mcp.server.models import InitializationOptions
+import mcp.server.stdio
+import mcp.types as types
+from typing import Any
+
+server = Server("arim-agentic-mcp")
+
+@server.list_tools()
+async def list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name="submit_training_job",
+            description=(
+                "Submit a fine-tune job to the GPU cluster. "
+                "Requires L2+ agent tier and a valid training_job_approval.approval_record_id."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "skill_name": {"type": "string"},
+                    "skill_version": {"type": "string"},
+                    "approval_record_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                    "hp_range_snapshot_hash": {"type": "string"},
+                    "requester_pubkey": {"type": "string"},
+                },
+                "required": ["skill_name", "approval_record_id",
+                             "hp_range_snapshot_hash", "requester_pubkey"],
+            },
+        ),
+        types.Tool(
+            name="run_inference",
+            description="Run inference on a trusted checkpoint (L1+).",
+            inputSchema={"type": "object", "properties": {
+                "checkpoint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "input_batch_uri": {"type": "string"},
+            }, "required": ["checkpoint_sha256", "input_batch_uri"]},
+        ),
+        types.Tool(
+            name="fetch_model_metadata",
+            description="Read-only. Fetch skill / checkpoint metadata (L1+).",
+            inputSchema={"type": "object", "properties": {
+                "query": {"type": "string"},
+            }, "required": ["query"]},
+        ),
+    ]
+```
+
+### B.5.3 tool dispatch と権限チェック
+
+```python
+# scripts/mcp_server/dispatch.py
+from mcp.server import Server
+import mcp.types as types
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
+    ctx = _resolve_caller_context(arguments.get("requester_pubkey"))
+    _enforce_tier_for_tool(name, ctx.agent_tier)     # B.5.4
+
+    if name == "submit_training_job":
+        _require_non_agent_approval(arguments["approval_record_id"])   # B.5.5
+        _log_audit_event(name, arguments, ctx)                         # B.5.6
+        result = _submit_to_scheduler(arguments)
+        return [types.TextContent(type="text", text=result.to_json())]
+
+    elif name == "run_inference":
+        _verify_checkpoint_trust(arguments["checkpoint_sha256"])
+        _log_audit_event(name, arguments, ctx)
+        result = _run_inference(arguments)
+        return [types.TextContent(type="text", text=result.to_json())]
+
+    elif name == "fetch_model_metadata":
+        _log_audit_event(name, arguments, ctx)
+        return [types.TextContent(type="text", text=_query_metadata(arguments["query"]))]
+
+    else:
+        raise ValueError(f"unknown tool: {name}")
+```
+
+### B.5.4 tool レベルでの train / infer 権限分離
+
+```python
+# scripts/mcp_server/authz.py
+from dataclasses import dataclass
+
+@dataclass
+class CallerContext:
+    principal_id: str
+    agent_tier: str              # "L1" | "L2" | "L3"
+    is_human: bool
+    org_scope: str               # "L-Self" | "L-Lab" | "L-Org" (Ch15)
+
+TOOL_MIN_TIER = {
+    "submit_training_job":  "L2",   # 学習ジョブは L2 以上
+    "run_inference":        "L1",   # 推論は L1 でも可
+    "fetch_model_metadata": "L1",
+    "approve_gate":         "human_only",   # Gate 承認は非 agent 限定 (Ch13)
+}
+
+def _enforce_tier_for_tool(tool_name: str, caller_tier: str) -> None:
+    required = TOOL_MIN_TIER.get(tool_name)
+    if required is None:
+        raise PermissionError(f"tool not registered in authz table: {tool_name}")
+    if required == "human_only":
+        # 呼び出し側に is_human が付いていなければ拒否（B.5.5 と併用）
+        raise PermissionError("gate approval must go through Human hook (B.5.5)")
+    order = {"L1": 1, "L2": 2, "L3": 3}
+    if order[caller_tier] < order[required]:
+        raise PermissionError(
+            f"tier {caller_tier} cannot call {tool_name} (requires {required})"
+        )
+```
+
+### B.5.5 Human 承認 hook（Gate1 の MCP 実装）
+
+```python
+# scripts/mcp_server/human_gate.py
+import re
+from datetime import datetime, timezone, timedelta
+
+def _require_non_agent_approval(approval_record_id: str) -> None:
+    """
+    第13章 Gate1 を MCP レベルで強制。
+    - approval_record_id は 64-hex sha256（形式検証）
+    - approval store から non-agent 承認済みかを取得
+    - 期限内であること
+    """
+    assert re.fullmatch(r"[0-9a-f]{64}$", approval_record_id), \
+        "approval_record_id must be sha256 hex"
+
+    record = _approval_store.get(approval_record_id)
+    if record is None:
+        raise PermissionError(f"approval not found: {approval_record_id}")
+    if not record["approver_is_non_agent"]:
+        raise PermissionError("approver must be a non-agent principal (Gate1 / Ch13)")
+    if record["state"] != "approved":
+        raise PermissionError(f"approval state = {record['state']} (must be 'approved')")
+    now = datetime.now(timezone.utc)
+    expiry = datetime.fromisoformat(record["expiry_at_utc"])
+    if now > expiry:
+        raise PermissionError(f"approval expired at {expiry}")
+
+    # 監査用: approval の payload_hash と現在のジョブ payload の一致を後段で照合
+```
+
+> [!TIP]
+> Human 承認 UI 自体は本サーバの外部（Web UI + SSO + 電子署名）に置くのが自然です。MCP サーバは「承認済み記録の検証」だけを担当し、「承認手続きそのもの」を担わせないことで責務境界が明確になります（第15章 §15.6 の責任分担 3 分割と一致）。
+
+### B.5.6 監査 log と cross-reference
+
+```python
+# scripts/mcp_server/audit.py
+import hashlib, json
+from datetime import datetime, timezone
+from pathlib import Path
+
+AUDIT_LOG = Path("/var/log/arim-mcp/audit.jsonl")  # append-only（ext4 の chattr +a 推奨）
+
+def _log_audit_event(tool_name: str, arguments: dict, ctx: "CallerContext") -> None:
+    """
+    Ch14 §14.8 audit_result_provenance の元データを吐き出す。
+    - append-only ファイル、prev_hash chain（tamper-evident）
+    - Ch14 cross_reference_findings 生成に使う 5 種類の ledger を stream
+    """
+    entry = {
+        "ts_utc": datetime.now(timezone.utc).isoformat(),
+        "tool": tool_name,
+        "principal_id": ctx.principal_id,
+        "agent_tier": ctx.agent_tier,
+        "is_human": ctx.is_human,
+        "arguments_hash": hashlib.sha256(
+            json.dumps(arguments, sort_keys=True).encode()
+        ).hexdigest(),
+        "server_version": _SERVER_VERSION,
+        "registry_hash_at_call": _current_registry_hash(),   # Ch14
+    }
+    entry["prev_hash"] = _last_entry_hash(AUDIT_LOG)
+    entry["self_hash"] = hashlib.sha256(
+        json.dumps(entry, sort_keys=True).encode()
+    ).hexdigest()
+    with AUDIT_LOG.open("a") as f:
+        f.write(json.dumps(entry) + "\n")
+```
+
+**5 種の外部 ledger（Ch14 canonical）と MCP tool の対応**：
+
+| Ledger | MCP tool で生成 | Ch14 で cross-reference |
+|---|---|---|
+| scheduler_ledger | `submit_training_job` | Skill provenance の `training_job_approval.approval_record_id` と突合 |
+| inference_ledger | `run_inference` | Gate1/2/3 発火時系列と突合 |
+| model_registry_ledger | `submit_training_job` の成果 | `weights_sha256` と `checkpoint_registry.jsonl` の突合 |
+| gate_approval_ledger | `_require_non_agent_approval` 呼出 | provenance `gate_state_machine` と突合 |
+| revocation_ledger | separate (Ch15) | `model_distribution_contract_ref.revocation` と突合 |
+
+### B.5.7 起動と client 側からの利用
+
+```python
+# scripts/mcp_server/__main__.py
+import asyncio
+import mcp.server.stdio
+
+async def main() -> None:
+    async with mcp.server.stdio.stdio_server() as (read, write):
+        await server.run(
+            read, write,
+            InitializationOptions(
+                server_name="arim-agentic-mcp",
+                server_version="0.1.0",
+                capabilities=server.get_capabilities(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities={},
+                ),
+            ),
+        )
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Client 側（agentic runner）は MCP プロトコルで tool を呼び出します。**agent は `approve_gate` を呼べない**（tier 制約）、**`submit_training_job` は事前に取得した `approval_record_id` を必ず渡す**、という制約が API レベルで強制されます。
+
+### B.5.8 テスト観点
+
+- [ ] `submit_training_job` に古い `approval_record_id`（期限切れ）を渡すと `PermissionError`
+- [ ] `submit_training_job` の payload_hash と approval の payload_hash が一致しない場合に拒否
+- [ ] L1 agent が `submit_training_job` を呼ぶと `PermissionError`
+- [ ] `run_inference` に未登録 `checkpoint_sha256` を渡すと拒否
+- [ ] audit log が append-only（`chattr +a`）、prev_hash chain が壊れた場合に検知
+- [ ] agent が `approve_gate` 相当を偽装できない（tier で塞ぐ）
+
+---
+
+## B.6 まとめ
+
+- **PyTorch / JAX の決定論設定**は起動時 1 回で終わらせ、provenance に 7 項目（seed, worker seed, cudnn_deterministic 等）を必ず記録
+- **DataLoader worker のシード伝播**が抜けると Ch14 DG-08 に該当
+- **Hugging Face から FM を取得**する場合は `40-hex revision` + `HfApi resolved sha` + `snapshot_download(allow_patterns)` + `file-level sha256` + `safetensors のみ` の 5 点セットが最小
+- **MCP サーバ**は組織内の「特に権限を要する能力」を集約する場所として設計する。tool 名で train / infer / metadata を明確に分け、tier 制約を authz テーブルで宣言的に管理
+- **Human 承認 hook** は MCP tool の入口に置き、UI 手続きは外部委譲。「承認記録の検証」と「承認手続き」を混ぜない
+- **audit log** は tamper-evident（append-only + prev_hash chain）にし、5 種の ledger を Ch14 cross-reference の元データにする
+
+## 参考資料
+
+### 本書内の該当章
+
+- 第4章：agent tier 定義、`agent_authorization`, `training_job_approval`, `approved_hp_range`
+- 第11章：Foundation Model 取得、`fm_fetch_and_verify`, `snapshot_download`
+- 第13章：Gate1/2/3 の役割、`integrated_provenance_chain`
+- 第14章：`agentic_deep_failure_audit`, `cross_reference_findings`, 5 種の外部 ledger
+- 第15章：組織 GPU 政策、`model_distribution_contract`, `responsibility_ledger`
+- 付録A：provenance 完全スキーマ、`SKILL.md` テンプレート
+
+### 外部参考
+
+- PyTorch reproducibility notes: https://pytorch.org/docs/stable/notes/randomness.html
+- PyTorch Distributed (DDP): https://pytorch.org/docs/stable/distributed.html
+- JAX pseudo random numbers: https://jax.readthedocs.io/en/latest/random-numbers.html
+- Flax documentation: https://flax.readthedocs.io/
+- Optax: https://optax.readthedocs.io/
+- safetensors: https://github.com/huggingface/safetensors
+- huggingface_hub client: https://huggingface.co/docs/huggingface_hub/index
+- Hugging Face Transformers: https://huggingface.co/docs/transformers/index
+- Model Context Protocol (MCP) specification: https://spec.modelcontextprotocol.io/
+- MCP Python SDK: https://github.com/modelcontextprotocol/python-sdk
+- Sigstore（承認・監査 log の署名参考）: https://www.sigstore.dev/

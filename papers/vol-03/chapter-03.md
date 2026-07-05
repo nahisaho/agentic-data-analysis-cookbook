@@ -90,7 +90,7 @@ flowchart TD
 
 ### 本書が PyTorch を主軸にする理由
 
-1. **教材が多く、エージェントが学習済み**：Copilot CLI がコード補完で最も強い
+1. **教材が多く、エージェントが参照しやすい**：PyTorch 例が豊富で、Copilot CLI が既存パターンを見つけやすい
 2. **timm / transformers / Captum / torchmetrics** の生態系が揃っている
 3. **fine-tune のワークフロー例が豊富**（少データ材料での実例も含む）
 
@@ -130,7 +130,7 @@ flowchart TD
 
 | 候補 | 位置づけ |
 |---|---|
-| PyTorch 単独 | 事足りることも多いが、`vmap` 相当は `torch.vmap`（experimental）で機能差あり |
+| PyTorch 単独 | 事足りることも多いが、`torch.func.vmap` も利用可能ながら JAX の変換体系ほど中心的ではなく、一部制約がある |
 | JAX 単独（Flax なし） | Neural Network の boilerplate が増える。Flax（または Equinox）推奨 |
 | Equinox | Flax より軽量。§3.10 拡張候補 |
 
@@ -148,20 +148,22 @@ flowchart TD
 ### 本書での主用途
 
 - **第6章** 1D Transformer / ViT の骨格取得（`transformers` から）
-- **第7章** MatBERT / ChemBERTa / SciBERT / MoLFormer / CrystaLLM の **frozen feature extractor** としての利用（第1章 §1.5 の Foundation Model 分類参照）
+- **第7章** frozen feature extractor としての FM 利用（第1章 §1.5 の FM 分類参照）：
+  - **NLP 系 FM**：MatBERT / ChemBERTa / SciBERT / MoLFormer は HF Hub 経由で入手、`AutoModel` + `AutoTokenizer` の共通 API で扱える
+  - **結晶・原子構造系 FM**：CrystaLLM / M3GNet / MACE / UMA はモデル固有ライブラリ中心（HF Hub にも一部あるが、API が統一されていない）
 - **第11章** Foundation Model + hallucination 対策（Hub の重み provenance 検証）
 
 ### 本書が HF を「第3の柱」にする理由
 
-1. **事前学習重みの事実上の配布路**：MatBERT / ChemBERTa / MoLFormer が Hub 経由
+1. **事前学習重みの事実上の配布路**：MatBERT / ChemBERTa / MoLFormer など NLP 系 FM が Hub 経由（結晶・原子構造系はモデル固有）
 2. **Tokenizer / Feature Extractor が付属**：材料 NLP の前処理が一貫
-3. **`pipeline()` API がエージェントに扱いやすい**：Skill 契約に落としやすい
+3. **`pipeline()` API がエージェントに扱いやすい**：ただし、後述の**セキュリティ設定**が必須（§3.9）
 
 ### 注意点
 
 | 注意 | 対処 |
 |---|---|
-| **重みのバージョン管理**：Hub は同一名で revision が更新される | `revision=` を Skill 契約に必ず指定、`weights_sha256` を照合（付録A） |
+| **重みの参照方式**：`revision` は branch（可変）/ tag（原則不変）/ commit hash（不変）を指定できる | Skill 契約では **必ず commit hash** を指定、`weights_sha256` を照合（付録A） |
 | **事前学習データのライセンス**：arXiv 由来テキスト等が含まれる場合、商用利用・特許出願で問題化 | `pretraining_dataset_license` を provenance に記録（第2章 §2.9） |
 | **重みライセンス**：Apache-2.0 / MIT / CC-BY-NC / 独自 と幅広い | `weights_license` を provenance に必須化（付録A） |
 | **モデルカード（README）が古い**：性能値が別データで測られている | 自研究室データで再検証（第7章 grouped CV） |
@@ -181,12 +183,13 @@ flowchart TD
 
 ### 受け入れチェック（Skill 起動時に走らせる）
 
-深層 Skill は起動時に以下を確認し、`provenance` に記録します（付録A で具体化）。
+深層 Skill は起動時に以下を確認し、`provenance` に記録します（GPU バックエンドに関わる主要フィールドのみを抜粋。**完全なフィールド一覧は §3.7 と付録 A**）。
 
 ```python
 # 概念コード（第4章で実装）
 def check_backend():
     return {
+        # --- GPU バックエンド関連（本節の主題） ---
         "gpu_backend": "cuda" | "rocm" | "mps" | "cpu",
         "cuda_version": "12.1" if cuda else None,
         "cudnn_version": "8.9" if cuda else None,
@@ -195,12 +198,16 @@ def check_backend():
         "torch_deterministic_algorithms": True,
         "cublas_workspace_config": ":4096:8",
         "gpu_memory_gb": 24.0 if cuda else None,
+        "random_seed_per_worker": 42,
+        # --- 重み関連（§3.7 で詳述）は check_backend の外で計測 ---
+        # weights_uri, weights_sha256, weights_license,
+        # pretraining_dataset_license, tolerance は Skill 契約側で管理
     }
 ```
 
 ### CPU fallback の設計原則
 
-- **推論のみの Skill** は CPU で動くことを Skill 契約で担保（GPU が使えなくても Human は結果を確認できる）
+- **推論のみの Skill** は原則 CPU で動くことを Skill 契約で担保する。ただし、**大型 FM**（原子構造系 MACE / UMA、あるいは大型 NLP FM）は CPU では RAM 不足・非現実的な推論時間になる場合があるため、**「CPU 非対応」を契約に明記**する例外を認める（第4章）
 - **学習を含む Skill** は「GPU が使えないときは明示的にエラーを返す」または「小規模テスト用の CPU 実行モードを別 Skill として持つ」
 - **CI では CPU モードで**、seed 固定・小サンプル・エポック数削減で回す（第4章）
 
@@ -209,14 +216,17 @@ def check_backend():
 
 ---
 
-## 3.7 Hugging Face Hub の重み配布と署名
+## 3.7 Hugging Face Hub の重み配布とハッシュ検証
+
+> [!NOTE]
+> 本節の「検証」は **SHA-256 によるハッシュ整合性の確認**であり、暗号学的な「署名（signature）」ではありません。真の署名（Sigstore / GPG / 署名付きマニフェスト等）は現状 HF Hub の標準機能ではなく、将来的な拡張候補です。本書は **hash + license + provenance 記録**で実用上の再現性・追跡可能性を担保する立場を採ります。
 
 ### Skill が重みを取得する流れ
 
 ```mermaid
 flowchart LR
-    A["Skill 起動"] --> B["contract に記載の<br/>weights_uri / revision"]
-    B --> C["HF Hub から取得<br/>huggingface_hub download"]
+    A["Skill 起動"] --> B["contract に記載の<br/>weights_uri / revision（commit hash）"]
+    B --> C["HF Hub から取得<br/>huggingface_hub download<br/>+ safetensors 優先"]
     C --> D["sha256 計算"]
     D --> E{"weights_sha256 と一致？"}
     E -- YES --> F["load, provenance 記録"]
@@ -228,14 +238,15 @@ flowchart LR
 | フィールド | 例 | なぜ必要か |
 |---|---|---|
 | `weights_uri` | `huggingface.co/lbnlp/MatBERT-base` | どこから取得したか |
-| `revision` | Git commit hash（例：`3fa2b1c...`） | 同じ名前でも重みが更新されうる |
-| `weights_sha256` | `d4c3b2...` | ダウンロード時の完全性検証 |
+| `revision` | **Git commit hash**（例：`3fa2b1c...`）を推奨。branch 名（`main` 等）は可変のため契約には不適 | 同じリポジトリでも branch 更新で重みが変わりうる |
+| `weights_sha256` | `d4c3b2...` | ダウンロード時の完全性検証（署名ではない） |
 | `weights_license` | `Apache-2.0` | 商用利用・再配布の可否 |
 | `pretraining_dataset_license` | `不明` を含めて記録 | 事前学習データが法的問題を起こしうる |
+| `safetensors_available` | `true / false` | pickle ベース重み読み込みのリスク管理（§3.9） |
 
 ### エージェントに Hub アクセスを許すか
 
-**Read-only ダウンロード**は許容範囲、**アップロード（`push_to_hub`）は Human 承認必須**——これが本書の基本方針です（§3.9 で権限マップとして整理）。
+**Read-only ダウンロード**は許容範囲（ただしセキュリティ制約付き、§3.9）、**アップロード（`push_to_hub`）は本書では全レベルで禁止**——これが基本方針です。
 
 ---
 
@@ -275,19 +286,26 @@ vol-02 第3章で挙げた **循環設計問題** は、深層でさらに深刻
 | 操作 | レベル 1 | レベル 2 | レベル 3 | 備考 |
 |---|:---:|:---:|:---:|---|
 | `model.eval()` + 推論 | ✅ | ✅ | ✅ | 全レベル可 |
-| `torch.load` で既存 checkpoint 読み込み | ✅ | ✅ | ✅ | provenance 記録は必須 |
-| `HuggingFace pipeline()` で推論 | ✅ | ✅ | ✅ | revision 固定が条件 |
+| `torch.load` で既存 checkpoint 読み込み | ⚠️ 条件付き | ⚠️ 条件付き | ⚠️ 条件付き | **`weights_only=True` または safetensors 経由**、+ sha256 検証必須。`weights_only=False` は Human 承認 |
+| `safetensors.load_file` で重み読み込み | ✅ | ✅ | ✅ | pickle 実行を含まないため安全。sha256 検証は必須 |
+| `HuggingFace pipeline()` で推論 | ⚠️ 条件付き | ⚠️ 条件付き | ⚠️ 条件付き | **commit hash 固定 + `trust_remote_code=False` + safetensors 優先 + sha256 検証**が全て満たされる場合のみ許可。デフォルト branch のまま呼び出すのは禁止 |
 | `model.train()` + 学習ループ | ❌ | ✅ | ✅ | 事前承認ワークフロー内 |
 | `torch.save` で新 checkpoint 保存（別名） | ❌ | ✅ | ✅ | 追記のみ |
 | `torch.save` で既存 checkpoint **上書き** | ❌ | ❌ | ✅ | Human 承認ゲート必須 |
-| `huggingface_hub.download`（読み取り） | ✅ | ✅ | ✅ | revision + sha256 検証 |
+| `huggingface_hub.download`（読み取り） | ✅ | ✅ | ✅ | commit hash 固定 + sha256 検証 |
 | `huggingface_hub.push_to_hub`（アップロード） | ❌ | ❌ | ❌ | **本書は全レベルで禁止**、外部公開は Human のみ |
-| Hub の重み revision を勝手に更新 | ❌ | ❌ | ❌ | 契約の revision を書き換えるのは Human のみ |
+| Hub の重み revision（commit hash）を変更 | ❌ | ❌ | ❌ | 契約の revision を書き換えるのは Human のみ |
 | augmentation の種類・強度を変更 | ❌ | ❌ | ❌ | augmentation 契約による（第5章） |
 | 学習率・エポック数を変更 | ❌ | 契約範囲内 | 契約範囲内 | 契約が「範囲」を規定 |
 
 > [!WARNING]
-> **上書き系操作 3 つ**（既存 checkpoint 上書き / Hub アップロード / augmentation 変更）は、Skill 単位ではなく **ワークフロー全体の承認**が必要です（第4章）。エージェントがこれらを実行しようとしたら、必ず Human に判断を求める設計にします。
+> **pickle と `torch.load`**：`torch.load` はデフォルトで pickle を使って重みをデシリアライズするため、悪意ある checkpoint を読み込むと**任意コード実行**が発生します。エージェントに `torch.load` を許すときは、必ず以下のいずれかを満たします：
+> - `weights_only=True` を明示的に指定（PyTorch 2.x）
+> - **safetensors 形式**の重みに切り替える（pickle を含まず、実行リスクなし）
+> - 事前に **sha256** 検証と、信頼できる配布元（Hub の公式リポジトリ等）の確認
+
+> [!WARNING]
+> **上書き系操作 3 つ**（既存 checkpoint 上書き / Hub アップロード / augmentation 変更）は、Skill 単位ではなく **ワークフロー全体の承認**が必要です（第4章）。エージェントがこれらを実行しようとしたら、必ず Human に判断を求める設計にします。また、上記の pickle リスクにより **`torch.load` は「読み取り」であっても無条件では許さない**設計になります。
 
 ---
 
@@ -299,7 +317,7 @@ vol-02 第3章で挙げた **循環設計問題** は、深層でさらに深刻
 | **Keras 3**（multi-backend） | 一貫 API | 材料 NLP / 原子構造系の重み流通が限定的 |
 | **Equinox**（JAX 上） | Flax より軽量 | 教材の少なさから本書は Flax |
 | **Diffusers**（生成モデル） | 逆設計 | 生成 × Agentic は vol-05 候補 |
-| **DeepChem** | 材料・化学特化ラッパ | ラッパ層が provenance を隠す |
+| **DeepChem** | 材料・化学特化ラッパ | ラッパ層により provenance 記録箇所が増えるため、本書では扱わない |
 | **AllenNLP** | NLP フレームワーク | HF Transformers に集約 |
 | **JAX-MD / TorchMD** | 分子動力学 | 本書は「予測・分類・埋め込み」に scope 限定 |
 
@@ -310,8 +328,9 @@ vol-02 第3章で挙げた **循環設計問題** は、深層でさらに深刻
 - vol-03 は **PyTorch + JAX/Flax + Hugging Face** の 3 本柱で深層 × Agentic を扱う
 - **PyTorch** は生態系・教材の広さで主軸、**JAX/Flax** は関数型と NumPyro 親和で第2の柱、**HF** は重み流通の事実上のインフラ
 - **GPU 受け入れチェック**（backend / cuDNN 設定 / メモリ）を Skill 起動時に走らせ、provenance に記録
-- **HF Hub の重み**は `weights_uri / revision / sha256 / license` + `pretraining_dataset_license` を Skill 契約に必須化
-- **エージェント権限マップ**：推論と読み取りは全レベル可、学習と書き込みは段階的に、Hub アップロード / augmentation 変更 / revision 変更は Human 専管
+- **HF Hub の重み**は `weights_uri / revision（commit hash） / sha256 / license / pretraining_dataset_license / safetensors_available` を Skill 契約に必須化。「署名」ではなく**ハッシュ検証**である点を明確に扱う
+- **セキュリティ**：`torch.load` は pickle リスクにより **`weights_only=True` または safetensors 経由**、`pipeline()` は **commit hash + `trust_remote_code=False` + safetensors** が満たされる場合のみ許可
+- **エージェント権限マップ**：推論と読み取りは条件付きで可、学習と書き込みは段階的に、Hub アップロード / augmentation 変更 / revision 変更は Human 専管
 - 次章（第4章）から、**深層 × Agentic Skill の設計原則**——特に GPU provenance と Agentic 学習権限設計——に入る
 
 ### 章末チェックリスト
@@ -319,7 +338,9 @@ vol-02 第3章で挙げた **循環設計問題** は、深層でさらに深刻
 - [ ] **PyTorch / JAX / HF を「どういう場面で使い分けるか」** を、1 分で説明できる
 - [ ] 自分のデータで、**主に使うのは PyTorch か HF pipeline か**、当たりがついている
 - [ ] **GPU 受け入れチェック**が何をチェックするか（backend / cuDNN 設定 / メモリ）を挙げられる
-- [ ] **HF Hub からの重み取得**で記録すべき 5 フィールドを挙げられる（`weights_uri / revision / sha256 / license / pretraining_dataset_license`）
+- [ ] **HF Hub からの重み取得**で記録すべき 6 フィールドを挙げられる（`weights_uri / revision（commit hash） / sha256 / license / pretraining_dataset_license / safetensors_available`）
+- [ ] **`torch.load` の pickle リスク**と回避策（`weights_only=True` / safetensors）を説明できる
+- [ ] **`pipeline()` の安全条件**（commit hash + `trust_remote_code=False` + safetensors）を挙げられる
 - [ ] **エージェントに絶対に許さない操作 3 つ**（既存 checkpoint 上書き / Hub アップロード / augmentation 契約違反）を了解している
 - [ ] Skill provenance は **vol-01/02 の基本形 + vol-03 の GPU/深層/Agentic 拡張** で書くことを了解している
 
@@ -345,6 +366,7 @@ vol-02 第3章で挙げた **循環設計問題** は、深層でさらに深刻
 - Hugging Face Transformers: https://huggingface.co/docs/transformers/
 - Hugging Face Hub: https://huggingface.co/docs/hub/
 - Hugging Face Hub ライセンス: https://huggingface.co/docs/hub/repositories-licenses
+- safetensors（pickle 非依存の安全な重みフォーマット）: https://huggingface.co/docs/safetensors
 - timm: https://github.com/huggingface/pytorch-image-models
 - Captum: https://captum.ai/
 - NumPyro: https://num.pyro.ai/

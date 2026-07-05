@@ -66,7 +66,9 @@ flowchart TB
 
 深層モデルの softmax 出力は「学習時の cross-entropy を最小化した結果の確率らしき数値」であり、**真の予測確率とは一致しません**。
 
-### 数値例（教材上の典型パターン）
+### §8.3 confidence bin の「予測との差」
+
+**注**：下表の「予測との差」は各 bin の accuracy と bin **中央値** confidence（例：bin `0.9-1.0` は中央 0.95）の差です。
 
 学習済み ResNet を CIFAR-10 で評価すると（Guo et al., 2017 系の典型結果パターン）：
 
@@ -115,7 +117,7 @@ $$
 
 - $p_{ik}$: サンプル $i$ のクラス $k$ の予測確率
 - $y_{ik}$: one-hot 正解（0 or 1）
-- **範囲**: 0（完璧）〜 2 で悪化。二値分類なら 0〜1
+- **範囲**: 0（完璧）〜 2。**K-class one-hot 定義では K=2 でも 0〜2**（各サンプル最大寄与 $2$：予測 $[1,0]$ vs 正解 $[0,1]$）。二値分類で scalar $p \in [0,1]$ に対して $(p-y)^2$ を使う慣例では 0〜1。契約では**どちらの定義を使うか必ず明記**すること
 - 予測が正確でも overconfident なら悪化する
 
 ### Expected Calibration Error (ECE)
@@ -125,6 +127,8 @@ confidence を M bin に区切り、各 bin での |accuracy − confidence| の
 $$
 \mathrm{ECE} = \sum_{m=1}^{M} \frac{|B_m|}{N} \, \bigl| \, \mathrm{acc}(B_m) - \mathrm{conf}(B_m) \, \bigr|
 $$
+
+ここでは $B_m = \{ i \mid c_i \in ((m-1)/M, m/M] \}$（左端除外の半開区間）とします。softmax の max confidence は通常 $1/K$ 以上なので左端除外の影響は無視できます。$M$（bin 数）は **各 bin に十分なサンプルがある場合のみ 10-15 を採用**し、クラス不均衡・少データではサンプル数を bin ごとに報告するか、等頻度 bin に切り替えてください。
 
 - **範囲**: 0（完璧）〜 1
 - **典型的な採用基準**：ECE < 0.05 なら calibration OK（**例示；タスク・重要度で変わる**）
@@ -203,19 +207,43 @@ import torch.nn as nn
 import torch.optim as optim
 
 class TemperatureScaledModel(nn.Module):
+    """
+    Post-hoc temperature scaling。
+    重要：
+      - base_model の重みは frozen（`requires_grad_(False)`）。
+      - fit_temperature には eval モード・no_grad で抽出した logits を渡す。
+      - temperature を log 空間で持ち、常に正を保証（argmax 不変を保つ）。
+    """
     def __init__(self, base_model: nn.Module):
         super().__init__()
         self.base_model = base_model
-        self.temperature = nn.Parameter(torch.ones(1) * 1.0)
+        for p in self.base_model.parameters():
+            p.requires_grad_(False)                   # base 重み frozen
+        # log_temperature を parameter にすることで T = exp(log_T) > 0 を保証
+        self.log_temperature = nn.Parameter(torch.zeros(1))
+
+    @property
+    def temperature(self) -> torch.Tensor:
+        return self.log_temperature.exp()
 
     def forward(self, x):
-        logits = self.base_model(x)
+        self.base_model.eval()                        # 推論時常に eval
+        with torch.no_grad():
+            logits = self.base_model(x)
         return logits / self.temperature
 
     def fit_temperature(self, logits: torch.Tensor, labels: torch.Tensor, max_iter: int = 50):
-        """calibration set の logits + labels から T のみを最適化。"""
+        """
+        calibration set の logits + labels から log_temperature のみを最適化。
+        logits は事前に `base_model.eval()` + `torch.no_grad()` で抽出しておく：
+
+            base_model.eval()
+            with torch.no_grad():
+                logits = torch.cat([base_model(x).detach() for x, _ in calib_loader])
+                labels = torch.cat([y for _, y in calib_loader])
+        """
         nll_criterion = nn.CrossEntropyLoss()
-        optimizer = optim.LBFGS([self.temperature], lr=0.01, max_iter=max_iter)
+        optimizer = optim.LBFGS([self.log_temperature], lr=0.01, max_iter=max_iter)
 
         def closure():
             optimizer.zero_grad()
@@ -241,7 +269,12 @@ temperature_scaling:
     max_iter: 50
   acceptance:
     ece_after_scaling_threshold: 0.03          # example
-    accuracy_change_max_delta: 0.001           # argmax 保存確認（0 が理想）
+    # accuracy 変化ではなく個別予測の変化を数える（argmax 保存の厳密チェック）
+    prediction_change_count_max: 0             # tie 以外の変化は 0 でなければ fatal
+    allow_tie_only_changes: true               # 完全同点の場合のみ変化許容
+    accuracy_change_max_delta: 0.0             # 補助チェック（0 が理想）
+  temperature_constraint:
+    positive_only: true                        # log 空間で持つことで自動保証
   provenance:
     log_temperature_value: true
     log_calibration_set_hash: true
@@ -319,11 +352,23 @@ class DeepEnsemble:
 | 量 | 意味 | 高いとき |
 |---|---|---|
 | **`predictive_entropy`** ($H[\mathbb{E}[p]]$) | 総不確かさ | このサンプルは全体的に判別困難 |
-| **`expected_entropy`** ($\mathbb{E}[H[p]]$) | aleatoric（データノイズ）近似 | 個々のモデルもばらついている（データが本質的にあいまい） |
+| **`expected_entropy`** ($\mathbb{E}[H[p]]$) | aleatoric（データノイズ）近似 | 個々のモデルがそれぞれ高 entropy で迷っている（データが本質的にあいまい）。**モデル間の意見の分かれは `mutual_information` で見る** |
 | **`mutual_information`** ($H[\mathbb{E}[p]] - \mathbb{E}[H[p]]$) | epistemic（モデル不確かさ）近似 | モデル間で意見が分かれている（学習データ不足の可能性） |
 
 > [!NOTE]
 > **この分解は近似**です。「aleatoric = ノイズ、epistemic = 知識不足」という厳密な因果分解にはなりません（Deep Ensemble の epistemic は "分散" 由来で、真の posterior 上の不確かさとは限らない）。実務上は「両者を並置して監視する」が現実的です。
+
+> [!IMPORTANT]
+> **`_set_seeds(seed)` の実装要件**：Python `random`・NumPy・PyTorch CPU/CUDA・DataLoader worker seed（第4章 Layer 1）を **すべて** 設定します。それでも Deep Ensemble メンバー間の**真の独立性は保証されず**、data order・augmentation RNG・pretrained 初期化・checkpoint 共有などで多様性が崩れる可能性があります。契約に以下を追加してください：
+>
+> ```yaml
+> ensemble_diversity:
+>   record_member_seed: true
+>   record_data_order_seed_per_member: true
+>   record_augmentation_seed_per_member: true
+>   require_distinct_initialization_hash: true      # 初期重み hash が全 M で異なる
+>   min_pairwise_disagreement_on_val: "task_specific"  # 相関崩壊の早期検出
+> ```
 
 ### 正規化 entropy（Ch06 §6.3 の forward reference を回収）
 
@@ -340,8 +385,10 @@ def predictive_entropy_normalized(mean_probs: torch.Tensor) -> torch.Tensor:
     """mean_probs: (batch, K) -> (batch,) in [0, 1]"""
     eps = 1e-12
     K = mean_probs.shape[-1]
+    assert K > 1, "entropy normalization requires K > 1"
     H = -(mean_probs * (mean_probs + eps).log()).sum(-1)
-    return H / torch.tensor(K, dtype=H.dtype).log()
+    log_k = torch.log(torch.tensor(K, dtype=H.dtype, device=H.device))  # device 揃える
+    return H / log_k
 ```
 
 ---
@@ -352,7 +399,7 @@ def predictive_entropy_normalized(mean_probs: torch.Tensor) -> torch.Tensor:
 
 | 実装 | 計算コスト | 追加モデル | 特徴 |
 |---|---|---|---|
-| **A. Max-softmax** | 極低 | なし | 1 − max(softmax)。overconfidence の影響を受けるが baseline として便利 |
+| **A. Max-softmax uncertainty** | 極低 | なし | `1 - max(softmax)`。値域 [0, 1-1/K]、方向は「大きいほど危険」。overconfidence の影響を受けるが baseline として便利 |
 | **B. Predictive entropy (normalized)** | 極低 | なし | Deep Ensemble または単一モデルで計算可 |
 | **C. Deep Ensemble mutual information** | 中 | Deep Ensemble | epistemic の近似指標。OOD で高くなる |
 | **D. Mahalanobis on penultimate** | 中 | calibration set | 第7章 §7.5 の domain_gap と同じ手法（**役割は違う**、§8.10 で整理） |
@@ -393,9 +440,10 @@ uncertainty_stop_gate:
     - metric: "mutual_information"                   # epistemic
       threshold_warn: 0.15
       threshold_stop: 0.30
-    - metric: "max_softmax_probability"              # 1 - max_softmax
-      threshold_warn: 0.35                            # つまり max_softmax < 0.65 で warn
-      threshold_stop: 0.55
+    - metric: "max_softmax_uncertainty"              # = 1 - max_softmax_probability
+      direction: "higher_is_riskier"                  # 明示的な方向（実装バグ防止）
+      threshold_warn: 0.35                            # つまり max_softmax_probability < 0.65 で warn
+      threshold_stop: 0.55                            # つまり max_softmax_probability < 0.45 で stop
   # calibration の前提
   requires_calibration_check_first: true             # ECE < ece_threshold でないと gate 無効
   requires_temperature_scaling_if_ece_high: true
@@ -406,12 +454,22 @@ uncertainty_stop_gate:
   # stop 発動時に Human に渡す情報
   human_handoff_payload:
     - "sample_id"
+    - "triggered_metric_names"                       # どの monitor が発動したか
+    - "thresholds_used"                              # 発動時の閾値
     - "predicted_class_with_confidence"
+    - "top_k_classes_with_probabilities"             # k=3 程度
     - "predictive_entropy_normalized"
     - "mutual_information"
+    - "max_softmax_uncertainty"
     - "ensemble_member_predictions"
     - "domain_gap_score"                             # §7.5 と併記
     - "recent_calibration_ece"
+    - "temperature_value"                            # §8.5 の T
+    - "model_version"
+    - "calibration_set_hash"
+    - "raw_input_or_sanitized_view_uri"              # Human が実サンプルを確認できるように
+    - "recommended_next_action"                      # 推奨アクション（Human は上書き可）
+    - "allowed_human_actions"                        # Human が選べる action リスト
     - "provenance_uri"
 
   # エージェント権限
@@ -440,14 +498,14 @@ sequenceDiagram
     participant H as Human
 
     S->>M: predict(x)
-    M-->>G: (mean_probs, member_probs, entropy, MI)
-    G->>G: monitor thresholds を評価
-    alt entropy < warn かつ MI < warn
+    M-->>G: (mean_probs, member_probs, entropy, MI, max_softmax_unc)
+    G->>G: 各 monitor を評価<br/>(entropy / MI / max_softmax_uncertainty)
+    alt すべての monitor が warn 未満
         G-->>A: continue (自律決定 OK)
-    else warn <= entropy < stop
+    else いずれかが warn <= x < stop
         G-->>A: flag_and_continue
         A->>H: 週次サマリーに flag 記録
-    else entropy >= stop OR MI >= stop
+    else いずれかが stop 以上
         G-->>A: route_to_human
         A->>H: full_provenance を添えて送信
         H-->>A: 判定 / 再学習指示
@@ -499,13 +557,19 @@ sequenceDiagram
 
 ```yaml
 # combined_ood_and_uncertainty.yaml
+# 第7章 domain_gap_gate は pass / review / stop の tri-state を返す
 sample_admission_policy:
   step_1_domain_gap:                  # 第7章 §7.5
     reference: "domain_gap_gate.yaml"
+    on_pass: "run_step_2"
+    on_review: "route_to_human_with_optional_uncertainty_context"
+                                      # step 2 を実行するが結果は Human 参考用
+                                      # step 1 の review 判定を step 2 で覆すことは禁止
     on_stop: "block_inference"        # ここで止まったら uncertainty 測る意味がない
   step_2_uncertainty:                 # 本章 §8.8
     reference: "uncertainty_stop_gate.yaml"
-    only_if_step_1_passed: true
+    run_when_step_1: ["pass", "review_for_context_only"]
+    cannot_override_step_1_review_or_stop: true
     on_stop: "route_to_human"
 ```
 
@@ -528,6 +592,12 @@ sample_admission_policy:
 | Gate を「一時的に無効化」した後戻し忘れ | manual override | 契約で `disable_gate_all_levels: forbidden`、監査ログ必須 |
 | calibration set と test set が重複 | anti-leakage 違反 | 第5章 `deep_split_contract` で分離を fatal assert |
 | epistemic uncertainty が単一 checkpoint で推定できないのに主張 | Deep Ensemble/MC-Dropout なしで epistemic を語る | 単一モデルなら `max_softmax` + `domain_gap_gate` のみに絞る |
+| **Ensemble メンバーが seed 違いでも相関している** | data order・augmentation seed・初期化 hash が共有 | `ensemble_diversity` 契約に `require_distinct_initialization_hash: true` と `min_pairwise_disagreement_on_val`、`record_data_order_seed_per_member` を追加 |
+| **ECE / 閾値が seed 間で不安定** | calibration set が小さい / 特定 seed の偶然 | 複数 seed で calibration set を切り、ECE の平均・分散を報告。閾値は 95% CI で保守的に決める |
+| **閾値が時間と共に drift する（装置変化・分布シフト）** | 一度校正した閾値を放置 | 月次で ECE / 閾値を再校正するタスクを設ける、`weekly_summary_to_human` に監視項目を追加 |
+| **クラス不均衡下で ECE bin が空になる** | bin 数固定 15 で少数クラス消失 | 適応 bin（等頻度）に切替、または `n_bins` を減らす。bin ごとのサンプル数もレポート |
+| **temperature scaling を汚染された calibration set で学習** | val に test の一部が混入した | Ch05 anti-leakage assert に加えて calibration_set_hash を provenance に記録し、再現時に照合 |
+| **Deep Ensemble 推論時に model.eval() 忘れ** | dropout が active のまま推論 | 推論エントリで全メンバーを `eval()` に強制。`assert not m.training for m in ensemble.models` |
 
 ---
 

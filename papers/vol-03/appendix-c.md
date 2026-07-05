@@ -62,7 +62,7 @@ def dump_memory_summary(tag: str) -> None:
 ```
 
 > [!WARNING]
-> **`torch.cuda.empty_cache()` は基本的に呼ばない**。fragmentation を一時的に緩和しますが、PyTorch のアロケータがキャッシュを再構築するオーバーヘッドで学習が遅くなる/不安定になります。詳細は §C.2.4。
+> **`torch.cuda.empty_cache()` は学習の inner loop では呼ばない**。fragmentation を一時的に緩和しますが、PyTorch のアロケータがキャッシュを再構築するオーバーヘッドで学習が遅くなる/不安定になります。**呼んでよい状況**：validation 終了後 / 巨大モデル切替時 / 他プロセスに VRAM を返却する必要がある時 / `memory_stats()` で fragmentation が有意と診断された時。詳細は §C.2.4。
 
 ### C.2.2 分類 B / A：バッチ過大・activation 蓄積
 
@@ -89,7 +89,7 @@ for step, batch in enumerate(loader):
 3. ループ外で参照が残っていないか確認（`losses.append(loss)` は `.item()` してから）
 
 > [!NOTE]
-> **`losses.append(loss)` は分類 A の典型的な原因**です。`loss` は autograd グラフ全体を参照するため、リストに保持すると **1 ステップ分の activation がずっと解放されません**。必ず `losses.append(loss.item())` にしてください。第14章 DG-11 に該当。
+> **`losses.append(loss)` は分類 A の典型的な原因**です。`loss` は autograd グラフ全体を参照するため、リストに保持すると **1 ステップ分の activation がずっと解放されません**。必ず `losses.append(loss.item())` にしてください。（第14章 canonical registry には該当 ID なし——実装レベルの一般的バグとして扱う。）
 
 ### C.2.3 分類 G：gradient 蓄積
 
@@ -117,34 +117,36 @@ for batch in loader:
 ### C.2.4 分類 F：断片化
 
 `torch.cuda.memory_summary()` の出力で **「reserved: X MB / allocated: Y MB」で `X - Y` が大きい**（例：reserved 20 GB / allocated 12 GB）場合は断片化を疑います。
-
 **対処**（優先順位）：
 
-1. **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** を **`import torch` より前**に設定
-2. 動的サイズ入力（可変長シーケンス、`torch.nested`）を極力使わない
-3. batch 内で長さをそろえる（padding or bucketing）
-4. **どうしても駄目な場合のみ** `torch.cuda.empty_cache()`
+1. まず `torch.cuda.memory_stats()` の `inactive_split_bytes` / `num_alloc_retries` を確認して fragmentation の有意性を判定
+2. **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** を **`import torch` より前**に設定（PyTorch / CUDA バージョン依存、benchmark で確認してから採用）
+3. 動的サイズ入力（可変長シーケンス、`torch.nested`）を極力使わない
+4. batch 内で長さをそろえる（padding or bucketing）
+5. `max_split_size_mb` / `garbage_collection_threshold` の調整（allocator backend 依存）
+6. **どうしても駄目な場合のみ** `torch.cuda.empty_cache()`
 
 ```bash
 # scripts/run_train.sh（推奨）
 export CUDA_VISIBLE_DEVICES=0
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export CUBLAS_WORKSPACE_CONFIG=:4096:8   # 決定論も同時に（付録B B.2.1）
+export PYTHONHASHSEED=42                 # 決定論に必須（付録B B.2.1）
 python -m scripts.train
 ```
 
 ### C.2.5 有効バッチサイズと BatchNorm の相互作用
 
-`gradient_accumulation_steps` で有効バッチを維持しても、**BatchNorm の統計量は micro_batch 単位で更新される**ため、`micro_batch` が極端に小さいと分散推定が不安定になります。
+`gradient_accumulation_steps` で有効バッチを維持しても、**BatchNorm の統計量は micro_batch 単位で更新される**ため、`micro_batch` が極端に小さいと分散推定が不安定になります。以下は経験的ヒューリスティック（空間次元・チャネル数・タスクにより変動）です：
 
-| micro_batch | 推奨対応 |
+| micro_batch | 推奨対応（ヒューリスティック） |
 |---|---|
 | ≥ 32 | BatchNorm 可 |
 | 8〜32 | GroupNorm / LayerNorm 推奨 |
-| < 8 | InstanceNorm または SyncBatchNorm（DDP） |
+| < 8 | InstanceNorm または SyncBatchNorm（DDP、`effective_bn_batch = micro_batch × world_size` で判定）|
 
 > [!IMPORTANT]
-> BatchNorm を使うモデルで `micro_batch` を小さくした場合、**provenance に `normalization: "batch_norm_effective_micro_batch=8"` を必ず記録**してください。数値がずれる主要因になります（Ch14 DG-05）。
+> BatchNorm を使うモデルで `micro_batch` を小さくした場合、**provenance に `micro_batch_per_gpu` と `effective_bn_batch = micro_batch × world_size` の両方を記録**してください（Ch14 DG-01 canonical signal と整合）。DDP で SyncBN を使う場合はさらに `sync_bn_enabled: true` を記録。
 
 ---
 
@@ -157,36 +159,54 @@ python -m scripts.train
 | # | チェック項目 | コマンド | 期待値 |
 |---|---|---|---|
 | 1 | `CUBLAS_WORKSPACE_CONFIG` 環境変数 | `echo $CUBLAS_WORKSPACE_CONFIG` | `:4096:8` or `:16:8` |
-| 2 | `torch.backends.cudnn.deterministic` | `torch.backends.cudnn.deterministic` | `True` |
-| 3 | `torch.backends.cudnn.benchmark` | `torch.backends.cudnn.benchmark` | `False` |
-| 4 | `torch.use_deterministic_algorithms` | `torch.are_deterministic_algorithms_enabled()` | `True` |
-| 5 | DataLoader `worker_init_fn` | 付録B B.2.4 参照 | 明示設定済み |
-| 6 | GPU 型番 | `nvidia-smi -L` | 学習・検証で同一 |
-| 7 | CUDA / cuDNN / PyTorch バージョン | `python -c "import torch; print(torch.version.cuda, torch.backends.cudnn.version(), torch.__version__)"` | 学習・検証で同一 |
+| 2 | `PYTHONHASHSEED` 環境変数（付録A/B） | `echo $PYTHONHASHSEED` | 明示された数値 |
+| 3 | `torch.backends.cudnn.deterministic` | `torch.backends.cudnn.deterministic` | `True` |
+| 4 | `torch.backends.cudnn.benchmark` | `torch.backends.cudnn.benchmark` | `False` |
+| 5 | `torch.use_deterministic_algorithms` | `torch.are_deterministic_algorithms_enabled()` | `True` |
+| 6 | **TF32 制御**（Ch14 DG-01 canonical signal） | `torch.backends.cuda.matmul.allow_tf32`, `torch.backends.cudnn.allow_tf32` | 期待値と provenance の `tf32_allowed` が一致 |
+| 7 | Python / NumPy / torch seed | `random.seed`, `np.random.seed`, `torch.manual_seed`, `torch.cuda.manual_seed_all` | 全て同一 seed |
+| 8 | DataLoader `generator` と `worker_init_fn` | 付録B B.2.4 参照 | 明示設定済み |
+| 9 | GPU 型番 | `nvidia-smi -L` | 学習・検証で同一 |
+| 10 | CUDA / cuDNN / driver / PyTorch バージョン | `python -c "import torch; print(torch.version.cuda, torch.backends.cudnn.version(), torch.__version__)"` + `nvidia-smi --query-gpu=driver_version --format=csv` | 学習・検証で同一 |
 
 > [!WARNING]
-> **決定論は「同一 GPU 型番 + 同一 CUDA/cuDNN + 同一 PyTorch」でのみ保証**されます。A100 で学習した重みを H100 で再現しても bit-exact にはなりません（Ch14 DG-01）。provenance には `gpu_model`, `cuda_version`, `cudnn_version`, `torch_version` の 4 点を必ず記録してください。
+> **bit-exact 再現性は「PyTorch の保証範囲外」の op を含むため、原則として「許容誤差ベース」で運用**します。bit-exact を要求する場合でも、**同一 GPU 型番・同一 driver/CUDA/cuDNN/PyTorch・同一 TF32 / AMP 設定・全 seed 固定**まで揃える必要があり、それでも一部の op（scatter/gather 系、`atomicAdd` を使う ops、cuBLAS のバージョン差）は `torch.use_deterministic_algorithms(True)` により **fail-fast** します。A100 で学習した重みを H100 で bit-exact に再現できるとは限りません（Ch14 DG-01）。provenance には `gpu_model`, `driver_version`, `cuda_version`, `cudnn_version`, `torch_version`, `tf32_allowed`, `python_hash_seed` の 7 点を必ず記録してください（付録A §A.9 完全スキーマ参照）。
 
 ### C.3.2 「動いたつもり」を防ぐアサート
 
 ```python
 # scripts/gpu_diag/assert_determinism.py
-import os, torch
+import os, random, numpy as np, torch
 
-def assert_deterministic_ready() -> None:
+def assert_deterministic_ready(expected_seed: int,
+                               expect_tf32: bool = False) -> None:
+    # 1. Launcher で先に設定すべき環境変数
     assert os.environ.get("CUBLAS_WORKSPACE_CONFIG") in (":4096:8", ":16:8"), (
         "CUBLAS_WORKSPACE_CONFIG must be set BEFORE `import torch` "
         "(usually in launcher shell script). Add "
         "`export CUBLAS_WORKSPACE_CONFIG=:4096:8` and re-run."
     )
+    assert os.environ.get("PYTHONHASHSEED") == str(expected_seed), (
+        f"PYTHONHASHSEED must be exported as '{expected_seed}' before "
+        "python starts (see appendix B B.2.1)."
+    )
+    # 2. cuDNN / deterministic algorithms
     assert torch.backends.cudnn.deterministic is True
     assert torch.backends.cudnn.benchmark is False
     assert torch.are_deterministic_algorithms_enabled(), (
         "Call torch.use_deterministic_algorithms(True) at process start."
     )
+    # 3. TF32（Ch14 DG-01 canonical signal）
+    tf32_matmul = torch.backends.cuda.matmul.allow_tf32
+    tf32_cudnn = torch.backends.cudnn.allow_tf32
+    assert tf32_matmul == expect_tf32, (
+        f"TF32 matmul is {tf32_matmul}, expected {expect_tf32}. "
+        "Provenance field `tf32_allowed` must match this."
+    )
+    assert tf32_cudnn == expect_tf32
 ```
 
-このアサートを **Skill の入口（`run_train` の先頭）**に置き、失敗したら第14章 DG-02（決定論違反）として `audit.log` に記録するのが本書の運用モデルです。
+このアサートを **Skill の入口（`run_train` の先頭）**に置き、失敗したら第14章 **DG-01（GPU 非決定性による結果ずれ）** として `audit.log` に記録するのが本書の運用モデルです。
 
 ### C.3.3 「決定論 OFF が正当化される」場合
 
@@ -202,7 +222,7 @@ determinism:
   bit_exact_reproducibility: false
 ```
 
-**エージェントが自律的に決定論を OFF にすることは禁止**です（Ch14 AG-04 相当）。必ず人間承認を経てください。
+**エージェントが自律的に決定論を OFF にすることは禁止**です（Ch14 **AG-06 Human-in-the-loop バイパス**に相当——Gate1 の人間承認を経ずに provenance を書き換える行為として扱う）。必ず人間承認を経てください。
 
 ---
 
@@ -260,7 +280,7 @@ def scale_for_ci(config: dict) -> dict:
 with torch.amp.autocast("cuda", dtype=torch.bfloat16):
     ...
 
-# 2. GradScaler の状態確認（fp16 のみ）
+# 2. GradScaler の状態確認（fp16 のみ、bf16 では通常不要）
 scaler = torch.amp.GradScaler("cuda")
 print(scaler.get_scale())    # 極端に大きい/小さいなら overflow
 
@@ -270,6 +290,22 @@ assert torch.isfinite(loss).all(), "loss diverged before AMP"
 # 4. 特定 op を fp32 に強制
 with torch.amp.autocast("cuda", enabled=False):
     logits = model.classifier(features.float())   # 敏感な層だけ fp32
+```
+
+**fp16 の最小学習ループ**（bf16 では GradScaler 不要）：
+
+```python
+scaler = torch.amp.GradScaler("cuda")
+
+for batch in loader:
+    optimizer.zero_grad(set_to_none=True)
+    with torch.amp.autocast("cuda", dtype=torch.float16):
+        loss = model(batch).loss
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)                                 # clip 前に必須
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    scaler.step(optimizer)                                     # inf 検出時は skip
+    scaler.update()                                            # scale 動的調整
 ```
 
 対処優先順位：**bfloat16 に切替 → 学習率を下げる → 特定層を fp32 → AMP OFF**。**AMP OFF は最終手段**で、その場合 provenance に `amp: {status: "disabled", reason: "nan_divergence", ...}` を明示してください。
@@ -283,14 +319,26 @@ with torch.amp.autocast("cuda", enabled=False):
 | worker が死ぬ | メモリ不足 / 例外 | `worker_init_fn` にログ、`persistent_workers=True` |
 | **同じ seed でも結果が違う** | worker seed 未設定 | 付録B B.2.4 の `worker_init_fn` 必須 |
 
-### C.5.3 Hugging Face Hub 認証と Foundation Model 取得
+### C.5.3 DDP / マルチ GPU の hang（NCCL）
+
+| 症状 | 原因 | 対処 |
+|---|---|---|
+| `NCCL timeout` | rank 間の step 数不一致（データ枯渇、`drop_last=False`）| `DistributedSampler(drop_last=True)` + `set_epoch(epoch)` を毎エポック呼ぶ |
+| rank 0 のみ OOM | rank 0 に集約する処理（`.item()`, log） | rank 0 集約は最小限に |
+| grad が同期されないパラメータ | 条件分岐で forward スキップ | `DDP(..., find_unused_parameters=True)`（性能低下と引き換え） |
+| 診断情報不足 | NCCL ログ抑制 | `export NCCL_DEBUG=INFO`、`NCCL_ASYNC_ERROR_HANDLING=1` |
+
+> [!IMPORTANT]
+> DDP 実行時は provenance に **`world_size`, `rank`, `gpu_model_per_rank` の 3 項目**を必ず記録してください。rank 間で `gpu_model_per_rank` が異なる（例：A100 + H100 の混在）と Ch14 DG-01 に該当します。
+
+### C.5.4 Hugging Face Hub 認証と Foundation Model 取得
 
 | ステータス | 意味 | 対処 |
 |---|---|---|
 | 401 Unauthorized | トークン未設定 or 期限切れ | `export HF_TOKEN=hf_...`（`login()` は使わない、付録B B.4.1）|
 | 403 Forbidden | gated model の同意未了 | Hub UI で "Access repository" を人間が承認 |
 | 404 Not Found | repo 名タイポ or private | 40-hex revision と repo_id を確認 |
-| SHA256 mismatch | 途中で weight 差し替え | Ch14 AG-06、**即座に停止し audit へ**|
+| SHA256 mismatch | 途中で weight 差し替え | **Ch14 AG-08（Foundation Model の署名検証スキップ）**、**即座に停止し audit へ**|
 
 > [!WARNING]
 > **Foundation Model の重み配布・ライセンスは執筆時点から変わり得ます**。演習で使う repo_id / revision は **本書執筆時点（2026-07）** のものです。実行時に：
@@ -359,11 +407,13 @@ class SynthConfig:
     n_labs: int = 3
     n_instruments_per_lab: int = 2
     n_lots_per_instrument: int = 4
-    lot_size_lambda: float = 25.0        # ラプラス分布の平均
-    lot_size_min: int = 8
+    lot_size_mean: int = 25
+    lot_size_std: float = 5.0
+    lot_size_min: int = 20
+    lot_size_max: int = 40
     image_size: int = 256
     spectrum_dim: int = 1024
-    # 装置固有バイアス（provenance に必ず記録）
+    # 装置固有バイアス（truth manifest にのみ記録、学習には見せない）
     instrument_psf_sigma_range: tuple = (0.6, 1.8)
     instrument_bias_range: tuple = (-0.05, 0.05)
     output_root: str = "data/synthetic-deep"
@@ -373,14 +423,21 @@ def sha256_of_bytes(b: bytes) -> str:
 
 def _gen_sem_image(rng: np.random.Generator, size: int,
                    psf_sigma: float, bias: float) -> np.ndarray:
-    """疑似 SEM：低周波 Perlin ノイズ + 装置固有 PSF + bias。"""
+    """疑似 SEM 相当の低周波テクスチャ：Gaussian ノイズを FFT で smoothing、
+    装置固有 PSF sigma で低周波成分の広がりを、bias で正規化後の contrast 差を制御。
+
+    NOTE: これは実際の SEM 物理（grain / edge / charging / shot noise）を
+    再現するものではなく、「装置固有性を学ばせるための toy signal」。
+    §C.7.3 のワークで grain / Poisson noise / scale-bar mask を追加すると
+    より現実に近づく。
+    """
     base = rng.standard_normal((size, size)).astype(np.float32)
-    # 低周波化（簡易 Gaussian blur を FFT で）
     freqs = np.fft.fftfreq(size)[:, None]**2 + np.fft.fftfreq(size)[None, :]**2
     kernel = np.exp(-freqs * (psf_sigma * size) ** 2)
     smoothed = np.real(np.fft.ifft2(np.fft.fft2(base) * kernel))
-    img = smoothed + bias
-    img = (img - img.min()) / (img.max() - img.min() + 1e-8)
+    # 正規化してから bias を加える（bias が min-max で吸収されないように）
+    img = (smoothed - smoothed.min()) / (smoothed.max() - smoothed.min() + 1e-8)
+    img = np.clip(img + bias, 0.0, 1.0)
     return (img * 255).astype(np.uint8)
 
 def _gen_xrd_spectrum(rng: np.random.Generator, dim: int,
@@ -393,80 +450,136 @@ def _gen_xrd_spectrum(rng: np.random.Generator, dim: int,
     y += rng.normal(0, 0.01, size=dim).astype(np.float32)
     return np.clip(y, 0, None)
 
-def generate(cfg: SynthConfig) -> dict:
+def generate(cfg: SynthConfig) -> tuple[dict, dict]:
+    """returns (manifest_public, manifest_truth)
+
+    manifest_public: 学習プロセスに公開してよい情報のみ（サンプル ID / 階層 ID /
+        ファイル hash / split ID）。エージェントはこちらのみアクセス可。
+    manifest_truth: 装置バイアス真値・ピーク真値等の「答え」。
+        評価器 / Gate のみアクセス可、学習プロセスに渡してはならない（Ch14 DG-03）。
+    """
     root = Path(cfg.output_root)
     root.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(cfg.seed)
 
-    manifest = {
+    generator_hash = sha256_of_bytes(Path(__file__).read_bytes())
+    manifest_public = {
         "schema_version": "arim-synth-deep-1.0",
-        "generator_config": asdict(cfg),
-        "generator_source_sha256": sha256_of_bytes(
-            Path(__file__).read_bytes()),
-        "labs": [],
+        "generator_config_public": {                  # truth は含めない
+            k: v for k, v in asdict(cfg).items()
+            if k not in ("instrument_psf_sigma_range",
+                         "instrument_bias_range")
+        },
+        "generator_source_sha256": generator_hash,
+        "files_with_sha256": [],                      # Ch11/付録B canonical
+        "hierarchy": [],                              # ID / split のみ
+    }
+    manifest_truth = {
+        "schema_version": "arim-synth-deep-truth-1.0",
+        "generator_source_sha256": generator_hash,
+        "truths_by_instrument": [],
+        "truths_by_lot": [],
     }
 
     for l in range(cfg.n_labs):
         lab_id = f"lab_{l:02d}"
-        instruments = []
+        instruments_pub = []
         for i in range(cfg.n_instruments_per_lab):
             inst_id = f"{lab_id}_inst_{i}"
             psf = rng.uniform(*cfg.instrument_psf_sigma_range)
             bias = rng.uniform(*cfg.instrument_bias_range)
-            lots = []
+            manifest_truth["truths_by_instrument"].append({
+                "instrument_id": inst_id,
+                "psf_sigma_truth": float(psf),
+                "bias_truth": float(bias),
+            })
+            lots_pub = []
             for k in range(cfg.n_lots_per_instrument):
-                n = max(cfg.lot_size_min,
-                        int(rng.laplace(cfg.lot_size_lambda, 3.0)))
+                # 上下限で clip した正規分布（20-40 のロットサイズを保証）
+                n = int(np.clip(
+                    rng.normal(cfg.lot_size_mean, cfg.lot_size_std),
+                    cfg.lot_size_min, cfg.lot_size_max))
                 lot_id = f"{inst_id}_lot_{k}"
-                # ロット固有のピーク（真の材料信号 + ロット drift）
                 peaks = [(0.2 + 0.02 * k, 1.0), (0.7 - 0.01 * k, 0.6)]
-                samples = []
+                manifest_truth["truths_by_lot"].append({
+                    "lot_id": lot_id,
+                    "peaks_truth": peaks,
+                })
+                samples_pub = []
                 for s in range(n):
                     img  = _gen_sem_image(rng, cfg.image_size, psf, bias)
                     spec = _gen_xrd_spectrum(rng, cfg.spectrum_dim, peaks)
                     sid = f"{lot_id}_s{s:03d}"
-                    np.savez_compressed(
-                        root / f"{sid}.npz", image=img, spectrum=spec)
-                    samples.append({
-                        "sample_id": sid,
-                        "sha256": sha256_of_bytes(
-                            (root / f"{sid}.npz").read_bytes()),
+                    filename = f"{sid}.npz"
+                    np.savez_compressed(root / filename,
+                                        image=img, spectrum=spec)
+                    file_hash = sha256_of_bytes((root / filename).read_bytes())
+                    # Ch11 / 付録B canonical schema
+                    manifest_public["files_with_sha256"].append({
+                        "file":   filename,
+                        "kind":   "sample_npz",
+                        "sha256": file_hash,
                     })
-                lots.append({"lot_id": lot_id,
-                             "peaks_truth": peaks,
-                             "n_samples": n,
-                             "samples": samples})
-            instruments.append({
-                "instrument_id": inst_id,
-                "psf_sigma_truth": float(psf),
-                "bias_truth": float(bias),
-                "lots": lots,
-            })
-        manifest["labs"].append({"lab_id": lab_id,
-                                 "instruments": instruments})
+                    samples_pub.append({"sample_id": sid, "file": filename})
+                lots_pub.append({"lot_id": lot_id,
+                                 "n_samples": n,
+                                 "samples": samples_pub})
+            instruments_pub.append({"instrument_id": inst_id, "lots": lots_pub})
+        manifest_public["hierarchy"].append({"lab_id": lab_id,
+                                             "instruments": instruments_pub})
 
-    # manifest には「装置固有バイアス真値」を含める（Skill 学習後に検証可能）
-    with open(root / "manifest.yaml", "w", encoding="utf-8") as f:
-        yaml.safe_dump(manifest, f, sort_keys=False, allow_unicode=True)
-    return manifest
+    # 2 つの manifest を分けて出力
+    #   - manifest_public.yaml : 学習プロセスに公開してよい情報
+    #   - manifest_truth.yaml  : 評価器 / Gate のみが読む「答え」
+    with open(root / "manifest_public.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(manifest_public, f, sort_keys=False, allow_unicode=True)
+    with open(root / "manifest_truth.yaml", "w", encoding="utf-8") as f:
+        yaml.safe_dump(manifest_truth, f, sort_keys=False, allow_unicode=True)
+    return manifest_public, manifest_truth
 ```
+
+> [!IMPORTANT]
+> **`manifest_truth.yaml` は学習プロセスに絶対に見せない**でください。装置バイアス・ピーク位置の真値が学習に入ると Ch14 **DG-03（Fine-tune のデータリーク）** に該当します。運用上は `manifest_truth.yaml` を別ディレクトリ / 別 IAM ロールに置き、評価器と Gate だけが読める権限にします。
 
 ### C.7.2 生成データの provenance 刻印
 
-生成されたデータには **必ず manifest.yaml が同梱**され、以下を含みます：
+生成されたデータには **`manifest_public.yaml`（学習用）**と **`manifest_truth.yaml`（評価専用）**が同梱され、以下を含みます：
 
-| フィールド | 用途 | 対応章 |
-|---|---|---|
-| `schema_version` | 生成器スキーマ ID | Ch4 canonical |
-| `generator_config` | 全ハイパラ | Ch4 §4.5 |
-| `generator_source_sha256` | 生成スクリプトの hash | Ch11 §11.4 |
+| フィールド | 出力先 | 用途 | 対応章 |
+|---|---|---|---|
+| `schema_version` | public / truth 両方 | 生成器スキーマ ID | Ch4 canonical |
+| `generator_config_public` | public のみ | 学習に公開してよいハイパラ | Ch4 §4.5 |
+| `generator_source_sha256` | 両方 | 生成スクリプトの hash | Ch11 §11.4 |
+| `files_with_sha256[].{file,kind,sha256}` | public のみ | Ch11 / 付録B canonical schema | Ch11・Ch14 DG-06 |
+| `hierarchy` (lab/instrument/lot/sample ID) | public のみ | Ch13 階層構造 | Ch13 capstone |
+| `truths_by_instrument[].{psf_sigma_truth, bias_truth}` | **truth のみ** | 学習後の bias 復元検証 | Ch13 Gate2 |
+| `truths_by_lot[].peaks_truth` | **truth のみ** | ピーク位置の復元検証 | Ch13 Gate2 |
 | `psf_sigma_truth` / `bias_truth` | 装置固有真値 | Ch13 capstone 教師 |
-| `samples[].sha256` | 個別ファイルの integrity | Ch11・Ch14 DG-06 |
+| `files_with_sha256[].sha256` | 個別ファイルの integrity | Ch11・Ch14 DG-06 |
 
 > [!TIP]
-> **合成データの `manifest.yaml` は「Skill が学習した装置バイアス」と「真値」を後で照合できる**構造になっています。エージェントが `lab_00` で学習した重みを `lab_02` に転移するとき、真値との乖離が Ch13 Gate2 の判断材料になります。
+> `manifest_public.yaml` は学習・Skill 実行時に参照し、`manifest_truth.yaml` は評価器 / Ch13 Gate2 のみが読みます。エージェントが `lab_00` で学習した重みを `lab_02` に転移するとき、Gate 側で truth と学習結果を照合し、Ch13 Gate2 の判断材料にします。
 
-### C.7.3 実行例
+### C.7.3 split integrity と自主ワーク
+
+train / val / test の split integrity は Ch14 DG-03 の中心的関心事です。**split 定義そのものを hash 化**して provenance に刻印してください：
+
+```python
+def make_split_manifest(sample_ids: list[str], seed: int) -> dict:
+    rng = np.random.default_rng(seed)
+    ids = list(sample_ids); rng.shuffle(ids)
+    n = len(ids); n_tr = int(n*0.7); n_va = int(n*0.15)
+    tr, va, te = ids[:n_tr], ids[n_tr:n_tr+n_va], ids[n_tr+n_va:]
+    assert set(tr) & set(va) == set() and set(va) & set(te) == set()
+    def h(x): return sha256_of_bytes(json.dumps(sorted(x)).encode())
+    return {"train_ids": tr, "val_ids": va, "test_ids": te,
+            "train_split_hash": h(tr), "val_split_hash": h(va),
+            "test_split_hash": h(te)}
+```
+
+**自主ワーク（現実性を上げる）**：§C.7.1 の `_gen_sem_image` は toy signal です。より SEM 現実に近づけるには、grain 楕円の重ね合わせ / edge enhancement / Poisson noise / contrast 変動 / scale bar mask を追加してみてください。
+
+### C.7.4 実行例
 
 ```bash
 python -m scripts.synth.gen_deep_hierarchical \
@@ -475,7 +588,8 @@ python -m scripts.synth.gen_deep_hierarchical \
     --output-root data/synthetic-deep
 
 # 期待出力：
-#   data/synthetic-deep/manifest.yaml
+#   data/synthetic-deep/manifest_public.yaml   ← 学習に公開
+#   data/synthetic-deep/manifest_truth.yaml    ← 評価器のみ（別 IAM 推奨）
 #   data/synthetic-deep/lab_00_inst_0_lot_0_s000.npz
 #   ...  (合計 3 × 2 × 4 × ~25 ≒ 600 サンプル)
 ```
@@ -493,22 +607,30 @@ python -m scripts.synth.gen_deep_hierarchical \
 | ライセンスに商用利用可条項がある | ✅ 使用可 | 教育目的のみ限定 | 使用前に確認 |
 | 再配布可条項がある | ✅ Skill 同梱可 | ダウンロードのみ | 使用前に確認 |
 | 派生モデルの配布制限がない | ✅ Skill 出力を配布可 | 配布不可 | 使用前に確認 |
+| **attribution / citation 義務**がある | ✅ paper / README に記載 | — | 使用前に確認 |
+| **API ToS が data license と別**にある | ✅ 両方の条件を満たす | — | 使用前に確認 |
+| **bulk download / rate-limit** が許諾されている | ✅ 事前 DL 可 | ストリーミングのみ | 使用前に確認 |
+| ローカルキャッシュの**再配布**可 | ✅ 組織内共有可 | ダウンロード都度 | 使用前に確認 |
+| **学習済みモデル・出力の再配布**が制限されない | ✅ 派生物公開可 | 制限あり | 使用前に確認 |
 | PII / 機微データを含む | ❌ 使用不可 | ✅ 使用可 | 使用前に確認 |
-| エージェント経由の自動 fetch を許諾している | ✅ 自動 fetch 可 | 手動 fetch のみ | 手動を推奨 |
+| エージェント経由の**自動アクセス**を許諾している | ✅ 自動 fetch 可 | 手動 fetch のみ | 手動を推奨 |
 
 > [!IMPORTANT]
-> 「ライセンス条項の解釈」は法務判断です。組織内で使う場合は必ず所属機関の法務・データガバナンス窓口に確認してください。本書のガイドは **技術的な観点でのチェックリスト** であり、法的助言ではありません。
+> 「ライセンス条項の解釈」は法務判断です。組織内で使う場合は必ず所属機関の法務・データガバナンス窓口に確認してください。本書のガイドは **技術的な観点でのチェックリスト** であり、法的助言ではありません。特に**「データそのもののライセンス」と「API 経由でのアクセス条件（Terms of Use）」は別**であることが多く（例：Materials Project）、両方を独立に確認する必要があります。
 
 ### C.8.2 ベンチマーク一覧（2026-07 時点）
 
 | 名称 | ドメイン | ライセンス | エージェント自動 fetch | 本書での位置づけ |
 |---|---|---|---|---|
-| **NFFA-EUROPE SEM** | SEM 画像分類 | CC BY 4.0 | ✅ 可（要 credit）| §C.7 合成データと対比、Ch7 |
-| **UHCS microstructure** | 微細組織 SEM | CC BY 4.0 | ✅ 可 | Ch6 画像分類の実データ検証 |
-| **Materials Project** | 結晶構造・物性 | CC BY 4.0（データ）| △ API rate limit 注意 | Ch11 FM 事前学習の対比 |
-| **Open Catalyst 2020/2022** | 触媒構造・エネルギー | CC BY 4.0 | ✅ 可（大容量、事前 DL 推奨）| Ch7 転移学習 |
-| **AFLOW** | 結晶物性 | Non-commercial | △ 手動 fetch 推奨 | 参照のみ、Skill 埋め込み不可 |
-| **NOMAD** | マルチスケール実験・計算 | CC BY 4.0 | ✅ 可（メタデータ豊富）| Ch11 provenance の実例 |
+| **NFFA-EUROPE SEM** | SEM 画像分類 | CC BY 4.0（要確認）| ✅ 可（要 credit）| §C.7 合成データと対比、Ch7 |
+| **UHCS microstructure** | 微細組織 SEM | CC BY 4.0（要確認）| ✅ 可 | Ch6 画像分類の実データ検証 |
+| **Materials Project** | 結晶構造・物性 | データ CC BY 4.0（要確認）／**API は別 ToS** | △ API rate limit 注意 | Ch11 FM 事前学習の対比 |
+| **Open Catalyst 2020/2022** | 触媒構造・エネルギー | 配布時点の LICENSE を要確認（CC BY 4.0 に類する条件が多いが版により変動）| ✅ 可（大容量、事前 DL 推奨）| Ch7 転移学習 |
+| **AFLOW** | 結晶物性 | **要確認**（利用条件が明示ライセンスで示されない場合あり、商用・再配布は事前照会）| △ 手動 fetch 推奨 | 参照のみ、Skill 埋め込みは慎重に |
+| **NOMAD** | マルチスケール実験・計算 | 記録ごとに個別ライセンス（多くは CC BY 4.0 系）| ✅ 可（メタデータ豊富）| Ch11 provenance の実例 |
+
+> [!IMPORTANT]
+> 上表のライセンス欄は **2026-07 執筆時点の技術者向けメモ**であり、**法的助言ではありません**。特に AFLOW / Materials Project は「データ本体のライセンス」と「API 利用規約」が別条件で、片方だけの確認では不十分です。実利用前に必ず各プロジェクトの公式ページで **現時点の LICENSE / Terms of Use** を再確認してください。
 
 ### C.8.3 各ベンチマークの取得コマンド（例）
 
@@ -541,26 +663,39 @@ print(ds)
 
 > [!WARNING]
 > **エージェントに自動 fetch させる場合の必須要件**：
-> 1. URL / repo_id と revision（該当する場合）を Skill の allowlist に事前登録
-> 2. ダウンロード後に **file-level sha256 検証**（付録B B.4.4 の `files_with_sha256` パターン）
-> 3. ライセンス文字列を provenance の `dataset_license` に刻印（Ch11 §11.4）
+> 1. データ取得元を **`dataset_fetch_allowlist`** に事前登録（付録B B.5.3 の URI allowlist（`s3/gs/abfs`）とは別の allowlist として管理）：
+>    ```yaml
+>    dataset_fetch_allowlist:
+>      - type: hf_dataset
+>        repo_id: "open-catalyst-project/oc20"
+>        revision: "<40-hex-commit>"
+>      - type: https
+>        domain: "b2share.eudat.eu"
+>        path_prefix: "/records/nffa-europe-sem"
+>      - type: mp_api
+>        endpoint: "https://api.materialsproject.org"
+>    ```
+> 2. ダウンロード後に **file-level sha256 検証**（付録B B.4.4 の `files_with_sha256` パターンを流用）
+> 3. ライセンス文字列と取得時刻を provenance の `dataset_license` / `dataset_fetched_at` に刻印（Ch11 §11.4）
 > 4. **rate limit / 大容量 DL の再試行ポリシーを Skill 定義に明記**（Ch4）
 >
-> allowlist にないドメインへの fetch はエージェントが自律的に行ってはいけません（Ch14 AG-05 に該当）。
+> **`dataset_fetch_allowlist` にない取得元へエージェントが自律的にアクセスすることは禁止**（Ch14 **AG-06 Human-in-the-loop バイパス**に該当）。取得時に signature / hash 検証を省略した場合は **AG-08（署名検証スキップ）**として扱います。
 
 ### C.8.4 ライセンス変更に備えたフォールバック
 
-**Foundation Model と同様に、データセットのライセンスも変更され得ます**（章構成 v0.2 の失敗パターン §Foundation Model の重み配布・ライセンス変更）。以下を Skill 実行前に確認：
+**Foundation Model と同様に、データセットのライセンス条件も変更され得ます**（章構成 v0.2 の失敗パターン §Foundation Model の重み配布・ライセンス変更）。以下を Skill 実行前に確認：
 
 ```python
 # scripts/utils/dataset_license_check.py
 import hashlib, requests
 from datetime import date
 
+# ここでは公式ページの LICENSE ファイル/条項文字列のスナップショットを
+# hash 化して保存し、drift を検出する運用を推奨（法的解釈は入れない）。
 EXPECTED_LICENSES = {
-    "nffa-europe":  ("CC BY 4.0", "2026-07-01"),
-    "oc20":         ("CC BY 4.0", "2026-07-01"),
-    "aflow":        ("Non-commercial", "2026-07-01"),
+    "nffa-europe":  ("CC BY 4.0 (as noted on B2SHARE 2026-07-01)", "2026-07-01"),
+    "oc20":         ("Open Catalyst project LICENSE snapshot 2026-07-01", "2026-07-01"),
+    "aflow":        ("AFLOW terms snapshot 2026-07-01 (verify commercial use)", "2026-07-01"),
 }
 
 def check_dataset_license(name: str,
@@ -587,9 +722,9 @@ def check_dataset_license(name: str,
 - **OOM は B → A → G → F の順に診断**。`torch.cuda.empty_cache()` は基本使わない
 - **決定論は同一 GPU 型番 + 同一 CUDA/cuDNN + 同一 PyTorch でのみ**保証。**エージェントが自律的に決定論 OFF にすることは禁止**
 - **CPU fallback / CI smoke test** は「動く」ではなく「provenance が正しい schema で出る」ことを確認するもの
-- **演習データは ARIM 風合成データを主軸**にし、公開ベンチマークは対比用途に留める
-- **公開ベンチマークの自動 fetch は allowlist + file-level sha256 + ライセンス drift 検出**の 3 点セット
-- **すべてのトラブルシューティングは第14章 failure_pattern_registry と対応**させ、audit ledger の入力にする
+- **演習データは ARIM 風合成データを主軸**にし、公開ベンチマークは対比用途に留める。生成データは **`manifest_public` / `manifest_truth` を分離**し、truth を学習に見せない
+- **公開ベンチマークの自動 fetch は `dataset_fetch_allowlist` + file-level sha256 + ライセンス drift 検出**の 3 点セット
+- **すべてのトラブルシューティングは第14章 failure_pattern_registry（DG-01〜08 / AG-01〜09）と対応**させ、audit ledger の入力にする
 
 ---
 

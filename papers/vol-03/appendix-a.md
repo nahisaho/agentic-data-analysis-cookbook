@@ -443,10 +443,10 @@ success_criteria:
 forbidden:
   - action: "target_encoding_fitted_on_full_dataset"
     severity: "CRITICAL"
-    failure_pattern_ids: [DG-02, DG-08]
+    failure_pattern_ids: [DG-03]                       # data leakage
   - action: "adopt_deep_when_gbm_baseline_within_5pct"
     severity: "MEDIUM"
-    failure_pattern_ids: [MX-05, ORG-06]
+    failure_pattern_ids: [MX-04, ORG-06]
   - action: "silent_categorical_reencoding_at_inference"
     severity: "CRITICAL"
     failure_pattern_ids: [DG-06, AG-05]
@@ -495,7 +495,7 @@ success_criteria:
 forbidden:
   - action: "load_fm_without_hash_verify"
     severity: "CRITICAL"
-    failure_pattern_ids: [AG-08, DG-11]
+    failure_pattern_ids: [AG-08]                       # FM signature verification skip
   - action: "change_default_fm_version_without_gate"
     severity: "CRITICAL"
     failure_pattern_ids: [AG-02, ORG-04]
@@ -859,7 +859,10 @@ foundation_model_provenance:
   pretraining_data_license: "e.g., cc-by-4.0 (Ch11 canonical)"
   pretraining_data_summary: "short text (Ch11)"
   model_family: "matbert | crystallm | chemberta | other (Ch11)"
-  safetensors_files_with_sha256: "list[{file, sha256}]  (Ch11 canonical)"
+  # 正本：weights + tokenizer + config + generation_config を kind タグ付きで統一（付録B B.4.4）
+  files_with_sha256: "list[{file, kind, sha256}]  (Ch11 canonical, kind ∈ {weights, tokenizer, config, generation_config})"
+  # 後方互換の派生ビュー：files_with_sha256 の kind='weights' サブセット
+  safetensors_files_with_sha256: "derived from files_with_sha256 where kind='weights'"
   fetch_method: "snapshot_download | direct (snapshot_download 推奨 Ch11)"
   upstream_license_compatibility_verified: "bool"
 

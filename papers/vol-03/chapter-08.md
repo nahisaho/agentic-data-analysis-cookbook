@@ -11,7 +11,7 @@
 > - 第7章の `domain_gap_gate`（feature-level OOD）と、この章の `uncertainty_stop_gate`（output-level uncertainty）の**役割分担**を書き分けられる
 >
 > **本章で扱わないこと**
-> - **MC-Dropout / BNN**（Bayes by Backprop / VI / SG-MCMC）→ **第9章**（deep ensemble との使い分け表を含む）
+> - **MC-Dropout / BNN**（Bayes by Backprop / VI / SG-MCMC）→ **第9章**（Deep Ensemble との使い分け表を含む）
 > - **PyMC / NumPyro による本格ベイズ推論** → **第10-12章**（vol-02 継承 + 深層特徴の接続）
 > - **conformal prediction の詳細** → **第9章末で使い分け表のみ触れる**
 > - **Grad-CAM / SHAP / attribution** → **第10章**（解釈と誤判定流し戻し UX）

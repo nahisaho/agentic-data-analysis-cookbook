@@ -12,7 +12,7 @@
 | 目的 | 参照するセクション | 該当章 |
 |---|---|---|
 | 決定論的な学習ループを PyTorch で書く | B.2.1 - B.2.3 | 第4章・第14章 |
-| DataLoader worker のシード伝播を正しく行う | B.2.4 | 第14章 (DG-08) |
+| DataLoader worker のシード伝播を正しく行う | B.2.4 | 第14章 (DG-01) |
 | Mixed Precision / DDP を有効にしつつ再現性を保つ | B.2.5 - B.2.6 | 第14章 |
 | Checkpoint を append-only で保存 | B.2.7 | 第4章・付録A |
 | JAX / Flax で決定論的学習を書く | B.3 | 第6-9章 |
@@ -52,7 +52,7 @@ import torch
 
 def set_deterministic(seed: int) -> None:
     """
-    第4章 §4.5 の再現性条件と Ch14 DG-08 (cuDNN 非決定性) 対策。
+    第4章 §4.5 の再現性条件と Ch14 DG-01 (GPU 非決定性 / cuDNN 非決定性等) 対策。
     provenance には次の 7 項目を必ず記録：
       - random_seed (vol-02)
       - numpy_seed / python_hash_seed / random_seed_per_worker (vol-03)
@@ -130,7 +130,7 @@ def evaluate(model, loader, device) -> dict:
 ### B.2.4 DataLoader worker のシード伝播
 
 ```python
-# Ch14 DG-08：worker 内での numpy.random / random は再シードしないと非決定
+# Ch14 DG-01：worker 内での numpy.random / random は再シードしないと非決定
 def _worker_init_fn(worker_id: int) -> None:
     # torch.initial_seed() は worker ごとに一意な値を返す（seed + worker_id 由来）
     base_seed = torch.initial_seed() % (2**32)
@@ -352,10 +352,10 @@ p_train_step = jax.pmap(train_step, axis_name="batch")
 ### B.4.1 認証トークンの取り扱い
 
 > [!WARNING]
-> **`huggingface_hub.login()` は避ける**。`login()` は `add_to_git_credential=False` を渡しても **`~/.cache/huggingface/token` にトークンをファイル書き出しする**。HPC / 共有 FS ではトークン漏洩の温床（Ch14 DG-11）。**推奨は `token=os.environ["HF_TOKEN"]` を `HfApi` / `snapshot_download` / `from_pretrained` に直接渡すこと**、そして launcher で `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` を設定してトークンファイルの暗黙読み込みも遮断すること。
+> **`huggingface_hub.login()` は避ける**。`login()` は `add_to_git_credential=False` を渡しても **`~/.cache/huggingface/token` にトークンをファイル書き出しする**。HPC / 共有 FS ではトークン漏洩の温床です（credential exposure — 本書 Ch14 canonical registry には該当 ID なし、組織のセキュリティ規程に準拠して扱う）。**推奨は `token=os.environ["HF_TOKEN"]` を `HfApi` / `snapshot_download` / `from_pretrained` に直接渡すこと**、そして launcher で `HF_HUB_DISABLE_IMPLICIT_TOKEN=1` を設定してトークンファイルの暗黙読み込みも遮断すること。
 
 ```python
-# 環境変数のみ許可、コード内 hardcode 禁止（Ch14 DG-11 対策）
+# 環境変数のみ許可、コード内 hardcode 禁止（credential exposure 対策）
 # login() は呼ばない。個別 API に token を直接渡す。
 import os
 from huggingface_hub import HfApi, snapshot_download
@@ -513,7 +513,7 @@ ds = load_dataset(
     revision="<40-hex sha>",
     split="train",
     token=os.environ["HF_TOKEN"],
-    trust_remote_code=False,          # 任意コード実行を禁止（Ch14 DG-11）
+    trust_remote_code=False,          # 任意コード実行を禁止（Ch14 AG-08 関連: repo に紛れ込んだ任意コードが hash 検証をすり抜ける経路）
 )
 
 # provenance:
@@ -931,7 +931,7 @@ Client 側（agentic runner）は MCP プロトコルで tool を呼び出しま
 
 - **PyTorch / JAX の決定論設定**は起動時 1 回で終わらせ、provenance に 7 項目（seed, worker seed, cudnn_deterministic 等）を必ず記録。`CUBLAS_WORKSPACE_CONFIG` は **`import torch` より前**に launcher で export
 - **PyTorch 2.x では `torch.amp.*`** を使う（`torch.cuda.amp.*` は deprecated）
-- **DataLoader worker のシード伝播**が抜けると Ch14 DG-08 に該当
+- **DataLoader worker のシード伝播**が抜けると Ch14 DG-01 に該当
 - **Hugging Face から FM を取得**する場合は `40-hex revision` + `HfApi resolved sha` + `snapshot_download(allow_patterns)` + `weights + tokenizer + config` を全て file-level sha256 で検証 + `safetensors のみ` の 5 点セットが最小
 - **`huggingface_hub.login()` は避ける**（`~/.cache/huggingface/token` に書き出す）。`token=os.environ["HF_TOKEN"]` を個別 API に直接渡す
 - **MCP サーバ**は組織内の「特に権限を要する能力」を集約する場所として設計する。tool 名で train / infer / metadata を明確に分け、tier 制約を authz テーブルで宣言的に管理

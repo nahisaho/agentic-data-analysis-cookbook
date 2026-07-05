@@ -69,7 +69,7 @@ Foundation Model や pretrained CNN（ImageNet 事前学習など）を使う場
 | **画像事前学習**（ImageNet 等） | ResNet, ViT の事前学習 | 自然画像 | 材料画像とドメインが異なるため厳密照合は不要だが**ドメインギャップ**を第7章で評価 |
 | **原子ポテンシャル**（trajectory 事前学習） | UMA など | MD trajectory | trajectory 単位で照合、または `unknown` |
 
-- どの FM 種別でも、事前学習データが**公開されていない**場合（`pretraining_dataset_license: unknown`、第3章 §3.7）、重複チェック自体が不可能 → **契約上「重複可能性あり」と明記**して結果解釈時に反映
+- どの FM 種別でも、事前学習データが**公開されていない**場合（`pretraining_data_license: unknown`、第3章 §3.7）、重複チェック自体が不可能 → **契約上「重複可能性あり」と明記**して結果解釈時に反映
 - **NLP 系 FM に対して `material_id` で照合する誤り**に注意（NLP 系 FM の事前学習に MP の識別子は使われていない場合が多い）
 
 ### 新問題 3：エージェントによる augmentation の勝手な強化
@@ -597,7 +597,7 @@ applicability_domain:
 - **第4章 §4.5**：CI CPU smoke test 設計
 - **第4章 §4.8**：禁止事項の severity 表（A/B/C/D/E）
 - **第2章 §2.6**：事前学習データと評価データの重複、fine-tune データリーク
-- **第3章 §3.7**：事前学習重みライセンス、`pretraining_dataset_license`
+- **第3章 §3.7**：事前学習重みライセンス、`pretraining_data_license`
 - **第6章**：この章の契約を読み込む教師あり深層 Skill
 - **第14章**：augmentation の agent-side 強化による精度偽装事例
 

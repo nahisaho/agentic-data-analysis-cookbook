@@ -685,7 +685,7 @@ sections:
       - "revision (commit hash)"
       - "weights_sha256 (verified: true/false)"
       - "weights_license"
-      - "pretraining_dataset_license"
+      - "pretraining_data_license"
 
   - id: "3_training_and_inference"
     reference: "Ch4 Layer 3 + Ch7 Layer 4 (transfer) + Ch9 bayesian_inference_config"

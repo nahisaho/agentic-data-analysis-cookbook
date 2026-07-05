@@ -59,7 +59,7 @@ flowchart TD
 | **他人の事前学習重みを使う**（FM 転移） | ◎ | △（HF 変換が必要な場合あり） | ◎（Hub 経由） |
 | **1D CNN / 2D CNN を ARIM 実データで**教師あり学習 | ◎ | ◯ | — |
 | **Transformer / ViT を fine-tune** | ◎（timm / transformers） | ◯（Flax 実装は増加中） | ◎（PyTorch 実装が主流） |
-| **不確かさつき深層モデル**（deep ensemble / MC-Dropout / BNN） | ◎ | ◎（NumPyro との統合で強い） | △ |
+| **不確かさつき深層モデル**（Deep Ensemble / MC-Dropout / BNN） | ◎ | ◎（NumPyro との統合で強い） | △ |
 | **研究プロトタイピング**（新しい loss / 新しい微分計算） | ◯ | ◎（`grad`, `vmap`, `pmap`） | — |
 | **教材・チュートリアル・書籍の量** | ◎ | ◯ | ◎ |
 | **エージェントに触らせやすい**（安定 API / 例外の分かりやすさ） | ◎ | ◯（`jit` 内の error は難解になりがち） | ◎（`pipeline()` は特に easy） |
@@ -85,7 +85,7 @@ flowchart TD
 
 - **第6章** 教師あり深層 Skill（1D CNN / 2D CNN / ViT / Tabular）
 - **第7章** 転移学習・fine-tuning
-- **第8章** deep ensemble（Pillar 2 の主実装）
+- **第8章** Deep Ensemble（Pillar 2 の主実装）
 - **第10章** attribution（Captum が PyTorch 前提）
 
 ### 本書が PyTorch を主軸にする理由
@@ -123,7 +123,7 @@ flowchart TD
 ### 本書が JAX を「第2の柱」にする理由
 
 - **NumPyro (JAX 上) は vol-02 PyMC の思想と親和**：pure function・関数型・XLA
-- **`vmap` による deep ensemble の効率化**：`N` 個のモデルを 1 つの JIT カーネルにまとめられる
+- **`vmap` による Deep Ensemble の効率化**：`N` 個のモデルを 1 つの JIT カーネルにまとめられる
 - **研究コード**が JAX 実装で公開される頻度が上昇（例：DeepMind 系、GraphCast）
 
 ### 代替候補との比較
@@ -164,7 +164,7 @@ flowchart TD
 | 注意 | 対処 |
 |---|---|
 | **重みの参照方式**：`revision` は branch（可変）/ tag（原則不変）/ commit hash（不変）を指定できる | Skill 契約では **必ず commit hash** を指定、`weights_sha256` を照合（付録A） |
-| **事前学習データのライセンス**：arXiv 由来テキスト等が含まれる場合、商用利用・特許出願で問題化 | `pretraining_dataset_license` を provenance に記録（第2章 §2.9） |
+| **事前学習データのライセンス**：arXiv 由来テキスト等が含まれる場合、商用利用・特許出願で問題化 | `pretraining_data_license` を provenance に記録（第2章 §2.9） |
 | **重みライセンス**：Apache-2.0 / MIT / CC-BY-NC / 独自 と幅広い | `weights_license` を provenance に必須化（付録A） |
 | **モデルカード（README）が古い**：性能値が別データで測られている | 自研究室データで再検証（第7章 grouped CV） |
 
@@ -201,7 +201,7 @@ def check_backend():
         "random_seed_per_worker": 42,
         # --- 重み関連（§3.7 で詳述）は check_backend の外で計測 ---
         # weights_uri, weights_sha256, weights_license,
-        # pretraining_dataset_license, tolerance は Skill 契約側で管理
+        # pretraining_data_license, tolerance は Skill 契約側で管理
     }
 ```
 
@@ -241,7 +241,7 @@ flowchart LR
 | `revision` | **Git commit hash**（例：`3fa2b1c...`）を推奨。branch 名（`main` 等）は可変のため契約には不適 | 同じリポジトリでも branch 更新で重みが変わりうる |
 | `weights_sha256` | `d4c3b2...` | ダウンロード時の完全性検証（署名ではない） |
 | `weights_license` | `Apache-2.0` | 商用利用・再配布の可否 |
-| `pretraining_dataset_license` | `不明` を含めて記録 | 事前学習データが法的問題を起こしうる |
+| `pretraining_data_license` | `不明` を含めて記録 | 事前学習データが法的問題を起こしうる |
 | `safetensors_available` | `true / false` | pickle ベース重み読み込みのリスク管理（§3.9） |
 
 ### エージェントに Hub アクセスを許すか
@@ -328,7 +328,7 @@ vol-02 第3章で挙げた **循環設計問題** は、深層でさらに深刻
 - vol-03 は **PyTorch + JAX/Flax + Hugging Face** の 3 本柱で深層 × Agentic を扱う
 - **PyTorch** は生態系・教材の広さで主軸、**JAX/Flax** は関数型と NumPyro 親和で第2の柱、**HF** は重み流通の事実上のインフラ
 - **GPU 受け入れチェック**（backend / cuDNN 設定 / メモリ）を Skill 起動時に走らせ、provenance に記録
-- **HF Hub の重み**は `weights_uri / revision（commit hash） / sha256 / license / pretraining_dataset_license / safetensors_available` を Skill 契約に必須化。「署名」ではなく**ハッシュ検証**である点を明確に扱う
+- **HF Hub の重み**は `weights_uri / revision（commit hash） / sha256 / license / pretraining_data_license / safetensors_available` を Skill 契約に必須化。「署名」ではなく**ハッシュ検証**である点を明確に扱う
 - **セキュリティ**：`torch.load` は pickle リスクにより **`weights_only=True` または safetensors 経由**、`pipeline()` は **commit hash + `trust_remote_code=False` + safetensors** が満たされる場合のみ許可
 - **エージェント権限マップ**：推論と読み取りは条件付きで可、学習と書き込みは段階的に、Hub アップロード / augmentation 変更 / revision 変更は Human 専管
 - 次章（第4章）から、**深層 × Agentic Skill の設計原則**——特に GPU provenance と Agentic 学習権限設計——に入る
@@ -338,7 +338,7 @@ vol-02 第3章で挙げた **循環設計問題** は、深層でさらに深刻
 - [ ] **PyTorch / JAX / HF を「どういう場面で使い分けるか」** を、1 分で説明できる
 - [ ] 自分のデータで、**主に使うのは PyTorch か HF pipeline か**、当たりがついている
 - [ ] **GPU 受け入れチェック**が何をチェックするか（backend / cuDNN 設定 / メモリ）を挙げられる
-- [ ] **HF Hub からの重み取得**で記録すべき 6 フィールドを挙げられる（`weights_uri / revision（commit hash） / sha256 / license / pretraining_dataset_license / safetensors_available`）
+- [ ] **HF Hub からの重み取得**で記録すべき 6 フィールドを挙げられる（`weights_uri / revision（commit hash） / sha256 / license / pretraining_data_license / safetensors_available`）
 - [ ] **`torch.load` の pickle リスク**と回避策（`weights_only=True` / safetensors）を説明できる
 - [ ] **`pipeline()` の安全条件**（commit hash + `trust_remote_code=False` + safetensors）を挙げられる
 - [ ] **エージェントに絶対に許さない操作 3 つ**（既存 checkpoint 上書き / Hub アップロード / augmentation 契約違反）を了解している

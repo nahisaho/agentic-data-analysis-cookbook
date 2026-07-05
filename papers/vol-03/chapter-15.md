@@ -161,7 +161,7 @@ never_allowed:
 | **Inter-Org**（機関間） | 大学 A から大学 B へ、産学連携先へ | provenance + 契約 + 使用制限 + 失効条件 |
 | **Public**（公開） | Hugging Face Hub / GitHub Releases 等 | provenance + ライセンス + 学習データ由来の制限（第11章） |
 
-**配布のたびに provenance が失われる**のが最も避けたい失敗です。第14章 §14.4 の AG-08（署名検証スキップ）と対称的に、**「受け取った側が provenance を復元できない配布」は組織的損失**です。
+**配布のたびに provenance が失われる**のが最も避けたい失敗です。第14章 §14.5 の AG-08（署名検証スキップ）と対称的に、**「受け取った側が provenance を復元できない配布」は組織的損失**です。
 
 ### 15.4.2 Skill 契約：`model_distribution_contract`
 
@@ -609,7 +609,7 @@ registry_version_transition:
     
     required_pattern_ids_exact_update:
       # Ch14 の exact set を organizational subset を含む形に拡張
-      previous_exact_set: "DG-01..DG-08, AG-01..AG-10, MX-01..MX-05"
+      previous_exact_set: "DG-01..DG-08, AG-01..AG-09, MX-01..MX-04"
       new_exact_set: "previous_exact_set + ORG-01..ORG-07"
       audit_ci_rejects_extra_or_missing_patterns: true
     

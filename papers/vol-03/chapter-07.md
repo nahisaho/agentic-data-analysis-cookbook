@@ -136,7 +136,7 @@ pretrained_weights:
   revision: "a1b2c3d4e5f6..."              # commit hash 必須（tag 名不可）
   weights_sha256: "9f8e7d6c5b4a..."        # 事前計算した SHA256（config 内に直接記録）
   weights_license: "MIT"
-  pretraining_dataset_license: "ImageNet-1k (research only)"
+  pretraining_data_license: "ImageNet-1k (research only)"
   safetensors_available: true              # true でなければ **fatal (load block)**（Ch06 §6.3 と整合）
   # 追加契約：pretraining の分布記述
   pretraining_distribution:

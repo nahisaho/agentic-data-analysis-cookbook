@@ -12,11 +12,11 @@
 | こんなときは | 参照節 | 関連章 |
 |---|---|---|
 | `CUDA out of memory` が出る | §C.2.1〜C.2.4 | 第4章・第6章 |
-| 「同じ seed なのに結果が違う」 | §C.3 | 第4章・第14章 DG-01/DG-02/DG-08 |
+| 「同じ seed なのに結果が違う」 | §C.3 | 第4章・第14章 DG-01 |
 | CI で GPU 前提コードが落ちる | §C.4 | 第4章（CPU fallback） |
 | Mixed precision で NaN が出る | §C.5.1 | 第6章・第8章 |
 | DataLoader が遅い / hang する | §C.5.2 | 付録B B.2.4 |
-| Hugging Face Hub 認証で 401/403 | §C.5.3 | 第11章・付録B B.4 |
+| Hugging Face Hub 認証で 401/403 | §C.5.4 | 第11章・付録B B.4 |
 | ARIM 実データにアクセスできない | §C.6 | 第2章・第4章 |
 | 公開ベンチマークを使いたい | §C.7〜C.8 | 第7章・第13章 |
 
@@ -550,12 +550,12 @@ def generate(cfg: SynthConfig) -> tuple[dict, dict]:
 | `schema_version` | public / truth 両方 | 生成器スキーマ ID | Ch4 canonical |
 | `generator_config_public` | public のみ | 学習に公開してよいハイパラ | Ch4 §4.5 |
 | `generator_source_sha256` | 両方 | 生成スクリプトの hash | Ch11 §11.4 |
-| `files_with_sha256[].{file,kind,sha256}` | public のみ | Ch11 / 付録B canonical schema | Ch11・Ch14 DG-06 |
+| `files_with_sha256[].{file,kind,sha256}` | public のみ | Ch11 / 付録B canonical schema | Ch11 §11.4 integrity（改ざん検知は AG-08 と同族の signature 系脅威）|
 | `hierarchy` (lab/instrument/lot/sample ID) | public のみ | Ch13 階層構造 | Ch13 capstone |
 | `truths_by_instrument[].{psf_sigma_truth, bias_truth}` | **truth のみ** | 学習後の bias 復元検証 | Ch13 Gate2 |
 | `truths_by_lot[].peaks_truth` | **truth のみ** | ピーク位置の復元検証 | Ch13 Gate2 |
 | `psf_sigma_truth` / `bias_truth` | 装置固有真値 | Ch13 capstone 教師 |
-| `files_with_sha256[].sha256` | 個別ファイルの integrity | Ch11・Ch14 DG-06 |
+| `files_with_sha256[].sha256` | 個別ファイルの integrity | Ch11 §11.4 |
 
 > [!TIP]
 > `manifest_public.yaml` は学習・Skill 実行時に参照し、`manifest_truth.yaml` は評価器 / Ch13 Gate2 のみが読みます。エージェントが `lab_00` で学習した重みを `lab_02` に転移するとき、Gate 側で truth と学習結果を照合し、Ch13 Gate2 の判断材料にします。

@@ -315,13 +315,18 @@ provenance:
     pretraining_data_license: "str"
     pretraining_data_summary: "str"
     model_family: "matbert | crystallm | chemberta | other"
-    safetensors_files_with_sha256: "list"
+    files_with_sha256: "list[{file, kind, sha256}]"    # kind ∈ {weights, tokenizer, config, generation_config}
+    # 派生ビュー（読み取り専用）：kind == 'weights' の filter
+    safetensors_files_with_sha256: "list (derived view of files_with_sha256 where kind='weights')"
     model_card_file_sha256: "str"                 # pinned README.md の hash
     manifest_id: "str (registry ID)"
     manifest_approvers_hashed: "list (quorum >= 2)"
     manifest_approval_timestamp: "iso8601"
     fetch_timestamp: "iso8601"
 ```
+
+> [!IMPORTANT]
+> **`files_with_sha256` が正本**です（付録B B.4.4 の manifest schema と一致）。**tokenizer / config / generation_config も weights と同じ file-level sha256 で pin**します（tokenizer / config が改ざんされると同一重みでも挙動が変わるため——付録B B.4.4 rubber-duck 修正 Blocking-3 参照）。`safetensors_files_with_sha256` は後方互換のための派生ビューで、`files_with_sha256` の `kind='weights'` サブセットに等しくなります。
 
 > [!WARNING]
 > **`revision: "main"` や tag での取得は禁止**です。tag / branch は後から書き換え可能で、同じ「バージョン」で違う重みが降ってくる可能性があります。**必ず commit hash（SHA）を manifest に固定**してください。

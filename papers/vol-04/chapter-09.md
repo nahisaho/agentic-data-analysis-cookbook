@@ -62,23 +62,37 @@ e_value_config:
   library: dowhy | evalue_r_port | custom
   library_version: <string>
   outcome_scale: risk_ratio | odds_ratio | standardized_mean_difference
+  effect_direction: harmful | protective          # RR > 1 (harmful) or RR < 1 (protective)
+  rr_oriented_away_from_null: <float>              # protective の場合 1/RR に反転してから E-value 計算
+  ci_bound_closest_to_null: <float>                # harmful → CI 下限、protective → 1/CI 上限
+  smd_to_rr_conversion:                            # 連続 outcome の場合必須
+    method: vanderweele_2020 | chinn_2000 | none_analog_only
+    baseline_risk: <float>                          # 変換に必要な baseline
+    conversion_evidence_uri: <string>
+    conversion_assumption_uri: <string>
   point_estimate_uri: <string>
   point_estimate_sha256: <string>
   confidence_interval_uri: <string>
-  e_value_point: <float>                      # 点推定に対する E-value
-  e_value_ci_bound: <float>                    # 信頼区間下限（or 上限）に対する E-value
-  threshold: <float>                           # 事前登録された "頑健と見なす" 閾値
-  threshold_rationale_uri: <string>            # 閾値の設定根拠（ドメイン知識に基づく）
-  posterior_cross_reference_uri: <string>      # vol-03 BNN posterior との対比レポート（§9.2.2）
+  e_value_point: <float>                          # 点推定に対する E-value
+  e_value_ci_bound: <float>                        # CI の null 側限界に対する E-value
+  threshold: <float>                               # 事前登録された "頑健と見なす" 閾値
+  threshold_rationale_uri: <string>                # 閾値の設定根拠（ドメイン知識に基づく）
+  posterior_cross_reference_uri: <string>          # vol-03 BNN posterior との対比レポート（§9.2.2）
 refutation_pass:
   criterion: e_value_ci_bound >= threshold
   status: pass | fail | insufficient_data
 prohibited_actions:
   - report_e_value_from_point_estimate_only              # fatal（CI 下限を報告必須）
+  - use_wrong_ci_side_for_protective_effect               # fatal（RR<1 の場合は 1/RR 反転 + 上限使用）
+  - compute_e_value_for_continuous_outcome_without_conversion_method  # fatal（SMD→RR 変換方法明示必須）
+  - report_e_value_pass_when_conversion_metadata_absent   # fatal
   - set_threshold_post_hoc                                # fatal（事前登録必須）
   - report_effect_without_e_value_when_declared_required  # fatal
   - confuse_e_value_with_bnn_posterior_uncertainty        # fatal（意味論混同）
 ```
+
+> [!WARNING]
+> **連続 outcome の E-value は "analog" 扱い**——SMD → RR 変換方法（VanderWeele 2020 / Chinn 2000 等）が事前登録されず、baseline_risk が指定されていない場合、E-value 値は**意味を成しません**。ARIM の破壊靭性のような連続 outcome では、変換方法を明示するか、**変換なしで analog 扱いとして「E-value は使わず placebo + subset を主 refutation にする」ことを事前宣言**します。
 
 ### 9.2.4 ARIM ケース
 
@@ -143,6 +157,9 @@ prohibited_actions:
 
 **手続き**：処置 $T$ を **無関係な列**（例：ランダム permutation、日付列、ID）に置換して同じ推定を実行 → 効果が 0 に近いことを確認。
 
+> [!WARNING]
+> **単純な marginal permutation は adjustment set $W$ との joint 分布を破壊**し、positivity / overlap の artifact を生む——placebo の fail/pass が推定器の妥当性でなく「合成 assignment の異常」を反映してしまう。**必ず `permutation_scheme: marginal | within_stratum | conditional_on_W` を明示** + **placebo assignment 後の positivity 診断** を通す。
+
 **Skill 契約**：
 ```yaml
 refutation_test: placebo
@@ -150,6 +167,10 @@ placebo_config:
   library: dowhy | custom
   library_version: <string>
   placebo_method: random_permutation | random_common_cause_variable | date_column
+  permutation_scheme: marginal | within_stratum | conditional_on_W   # W-adjusted design 保護
+  adjustment_set_uri: <string>
+  dag_of_record_uri: <string>
+  post_placebo_positivity_check_uri: <string>   # placebo assignment 後の positivity 診断
   n_replications: 100
   seed_uri: <string>                            # 事前登録された乱数 seed リスト
   placebo_effect_distribution_uri: <string>
@@ -160,6 +181,8 @@ refutation_pass:
   status: pass | fail | insufficient_data
 prohibited_actions:
   - report_effect_when_placebo_effect_significantly_nonzero   # fatal
+  - use_marginal_permutation_without_W_joint_preservation      # fatal（W 保護なし）
+  - proceed_when_post_placebo_positivity_fails                 # fatal（合成 assignment 異常）
   - reduce_n_replications_below_declared                       # fatal
   - reroll_placebo_seeds_until_pass                            # fatal（fishing）
 ```
@@ -175,30 +198,44 @@ rcc_config:
   library: dowhy
   library_version: <string>
   n_replications: 50
-  effect_shift_threshold: 0.05                  # 効果が閾値 5% 以内なら pass
+  effect_shift_metric: absolute | relative_to_original | standardized   # 明示必須
+  effect_shift_threshold: <float>               # metric に応じ設定（例：absolute 0.05, relative 0.05）
+  effect_shift_threshold_rationale_uri: <string>
+  near_zero_denominator_policy: use_absolute_when_original_below_epsilon  # 相対 metric の 0 割回避
   effect_shift_distribution_uri: <string>
+  median_effect_shift: <float>
+  p95_effect_shift: <float>                     # tail での不安定性検出
 refutation_pass:
-  criterion: median_effect_shift <= effect_shift_threshold
+  criterion: median_effect_shift <= effect_shift_threshold AND p95_effect_shift <= (1.5 * effect_shift_threshold)
   status: pass | fail | insufficient_data
 prohibited_actions:
   - report_effect_when_effect_shift_exceeds_threshold  # fatal
+  - report_median_shift_without_p95_tail               # fatal（median 単独は不安定性を隠蔽）
+  - use_relative_metric_when_original_effect_near_zero_without_fallback  # fatal（0 割回避必須）
 ```
 
 ### 9.4.3 unmeasured confounder への強度スケール
 
-第4章と第6章で列挙した「観測できない confounder」を **どの程度の強度なら効果が保たれるか** を DoWhy `add_unobserved_common_cause` で試算：
+第4章と第6章で列挙した「観測できない confounder」を **どの程度の強度なら効果が保たれるか** を DoWhy `add_unobserved_common_cause` で試算——**強度スケールは partial R² / observed benchmark に紐付け**（Cinelli-Hazlett omitted variable bias framework）：
 
 ```yaml
 refutation_test: unobserved_common_cause_strength
 uucs_config:
-  library: dowhy
-  effect_strength_on_treatment_grid: [0.01, 0.05, 0.1, 0.2, 0.5]
-  effect_strength_on_outcome_grid: [0.01, 0.05, 0.1, 0.2, 0.5]
+  library: dowhy | sensemakr
+  strength_scale: partial_r_squared | observed_confounder_benchmark | absolute
+  strength_scale_rationale_uri: <string>
+  observed_confounder_benchmark_uri: <string>   # 最強の観測 confounder の強度を benchmark に
+  effect_strength_on_treatment_grid: [...]      # partial R² スケール（例：[0.01, 0.05, 0.1, 0.2]）
+  effect_strength_on_outcome_grid: [...]        # 同上
   effect_estimate_matrix_uri: <string>          # 2D grid での効果推定
   threshold_of_practical_significance: <float>   # 事前登録
+  robustness_value_uri: <string>                 # Cinelli-Hazlett robustness value
 refutation_pass:
   criterion: effect_estimate_remains_practically_significant_up_to_declared_strength
   status: pass | fail
+prohibited_actions:
+  - use_absolute_strength_grid_without_scale_rationale  # fatal
+  - benchmark_against_weakest_observed_confounder        # fatal（最強でベンチマーク）
 ```
 
 **vol-03 BNN posterior との対比**：BNN が示す狭い credible interval が **必ずしも unmeasured confounder への頑健性を意味しない**ことをレポートで明示（§9.2.2）。
@@ -215,32 +252,51 @@ refutation_pass:
 refutation_test: data_subset_validation
 subset_config:
   library: dowhy | custom
+  subset_manifest_uri: <string>                  # 事前登録された subset 定義（immutable）
+  subset_manifest_sha256: <string>
   subset_definitions:
     - name: random_50pct
+      family: random_resample
       method: random_sample
       proportion: 0.5
       n_replications: 20
-      seed_uri: <string>
+      seed_uri: <string>                           # seed 事前登録
+      pass_criterion: subset_estimates_within_ci_of_original
+      pass_threshold: <float>                       # family 別（例：0.8）
+      pass_threshold_rationale_uri: <string>
     - name: by_device
+      family: grouped_loo
       method: leave_one_group_out
       group_column: device_id
+      pass_criterion: subset_estimates_within_ci_of_original
+      pass_threshold: <float>                       # grouped は family_wise error 制御
+      multiple_testing_policy: bonferroni | holm | none
     - name: by_time_period
+      family: grouped_loo
       method: leave_one_group_out
       group_column: quarter
+      pass_criterion: subset_estimates_within_ci_of_original
+      pass_threshold: <float>
+      multiple_testing_policy: bonferroni | holm | none
     - name: by_composition_bin
+      family: grouped_loo
       method: leave_one_group_out
       group_column: composition_bin
+      pass_criterion: subset_estimates_within_ci_of_original
+      pass_threshold: <float>
+      multiple_testing_policy: bonferroni | holm | none
   subset_effect_distribution_uri: <string>
   original_effect_estimate: <float>
-  criterion: subset_estimates_within_ci_of_original
   ci_level: 0.9
-  min_subsets_passing: 0.8                       # 80% のサブセットで pass
 refutation_pass:
+  criterion: all_families_meet_own_pass_threshold_with_multiple_testing_correction
   status: pass | fail | insufficient_data
 prohibited_actions:
-  - exclude_subsets_failing_after_seeing_results       # fatal（fishing）
-  - reduce_n_replications_below_declared               # fatal
-  - report_effect_when_min_subsets_passing_not_met     # fatal
+  - exclude_subsets_failing_after_seeing_results             # fatal（fishing）
+  - modify_subset_manifest_after_running                      # fatal
+  - pool_random_and_grouped_subsets_into_single_pass_fraction # fatal（family 別に評価必須）
+  - reduce_n_replications_below_declared                      # fatal
+  - report_effect_when_any_family_below_threshold             # fatal
 ```
 
 ### 9.5.2 ARIM での典型的 subset
@@ -256,36 +312,54 @@ prohibited_actions:
 
 ## 9.6 `counterfactual_scope_gate` の Ch9 側の再検証
 
-### 9.6.1 なぜ再検証か
+### 9.6.1 なぜ再検証か + "独立" の定義
 
-第8章で operational 化した `counterfactual_scope_gate` は **推定段階（Ch8 CATE Skill 内）** での判定でした。Ch9 refutation の一環として、**独立に再検証**します：
+第8章で operational 化した `counterfactual_scope_gate` は **推定段階（Ch8 CATE Skill 内）** での判定でした。Ch9 refutation の一環として、**独立に再検証**します——ただし "独立" の意味を 2 モードに厳密に分けます：
 
-- **推定 Skill が使った学習分布** と **refutation Skill が独立に再計算する学習分布** で判定結果が一致するか
-- Mahalanobis 距離・k-NN 密度・支持域が **依然として pass** か（データ更新やモデル再学習で変わる可能性）
-- `conditional_pass` 状態のケースについて、**Ch9 側でも同じ判定**か
+| モード | 意味 | 使い分け |
+|---|---|---|
+| **`audit_recompute_same_artifacts`** | Ch8 の凍結された preprocessing / feature 変換 / cluster 割当 / 閾値 / 学習分布 hash を **再利用**、実装（コード）だけ独立 | Ch8 の実装バグ / 再現性検証 |
+| **`data_update_recompute`** | 新データや再学習で **feature / cluster / 閾値をゼロから再計算** | データ更新後の scope 再確認 |
+
+- **重要**：cluster assignment・covariance 推定・閾値を **勝手に再計算する** と、Ch8 との disagreement が「causal な scope 違反」でなく「metric 定義の差異」を反映するため、gate 判定として意味を成しません。**`audit_recompute_same_artifacts` モードでは Ch8 artifact hash 一致が必須**。
+- **`data_update_recompute` モードでは、disagreement は必ず `estimator_contract_change_gate` を通す**——silent に "新しい閾値で pass" にしない。
 
 ### 9.6.2 Skill 契約
 
 ```yaml
 refutation_test: scope_gate_reverification
 scope_reverify_config:
+  mode: audit_recompute_same_artifacts | data_update_recompute
   cate_prediction_artifacts_uri: <string>       # Ch8 側の scope_gate 判定 artifact
   cate_prediction_artifacts_sha256: <string>
+  frozen_ch8_artifacts:                          # audit モードで必須
+    preprocessing_pipeline_sha256: <string>
+    feature_transform_sha256: <string>
+    cluster_assignment_sha256: <string>
+    covariance_estimation_sha256: <string>
+    threshold_manifest_sha256: <string>
+    training_distribution_sha256: <string>
   independent_recomputation:
     mahalanobis_distance_recomputed: <float>
     cluster_conditional_mahalanobis_recomputed: <float>
     knn_density_recomputed: <int>
     support_envelope_recomputed: <string>       # in / out per dimension
+    recomputation_code_uri: <string>             # Ch8 と別実装であることの証跡
   agreement_check:
     ch8_gate_status: pass | conditional_pass | fail
     ch9_gate_status: pass | conditional_pass | fail
-    disagreement_policy: fail_close_and_notify_reviewer
+    audit_mode_disagreement_policy: fail_close_and_flag_ch8_implementation_bug
+    data_update_disagreement_policy: escalate_to_estimator_contract_change_gate
 refutation_pass:
-  criterion: ch8_gate_status == ch9_gate_status AND both == "pass"
+  criterion: (mode == "audit_recompute_same_artifacts") ? ch8_gate_status == ch9_gate_status AND both == "pass"
+            : (mode == "data_update_recompute") ? ch9_gate_status == "pass" AND ecc_gate_status == "approved"
   status: pass | fail | disagreement
 prohibited_actions:
-  - reuse_ch8_gate_status_without_independent_recomputation   # fatal
-  - suppress_disagreement_by_recomputing_with_ch8_thresholds  # fatal
+  - reuse_ch8_gate_status_without_independent_recomputation      # fatal
+  - suppress_disagreement_by_recomputing_with_ch8_thresholds     # fatal
+  - switch_modes_after_running_recomputation                     # fatal（mode 事前登録必須）
+  - recompute_cluster_assignment_in_audit_mode                    # fatal（audit は artifact 再利用のみ）
+  - proceed_data_update_recompute_without_ecc_gate_approval      # fatal
 ```
 
 ### 9.6.3 disagreement の扱い
@@ -304,72 +378,131 @@ Ch8 で `pass` が Ch9 で `fail` に：
 
 ```yaml
 refutation_gate:
+  preregistration_manifest_uri: <string>         # 事前登録された全設定の manifest
+  preregistration_manifest_sha256: <string>
+  preregistration_approved_at: <timestamp>
+  preregistration_approver: causal_review_board
+  applicability_manifest_uri: <string>           # どの test が not_applicable か immutable 宣言
+  applicability_manifest_sha256: <string>
   declared_required_tests:                       # 事前登録された必須 refutation
     - e_value
     - rosenbaum_bounds                            # PSM のみ
     - placebo
     - random_common_cause
+    - unobserved_common_cause_strength
     - data_subset_validation
     - scope_gate_reverification                   # Ch8 CATE / g-formula のみ
+    - ite_prediction_coverage_refutation          # ite_labeled_prediction 主張時のみ
   test_results:
-    e_value: {status: pass, evidence_uri: ...}
-    rosenbaum_bounds: {status: pass, evidence_uri: ...}
-    placebo: {status: pass, evidence_uri: ...}
-    random_common_cause: {status: pass, evidence_uri: ...}
-    data_subset_validation: {status: pass, evidence_uri: ...}
-    scope_gate_reverification: {status: pass, evidence_uri: ...}
-  aggregate_status: pass | fail | partial
+    e_value: {status: pass | fail | insufficient_data | not_applicable, evidence_uri: ...}
+    rosenbaum_bounds: {status: ..., evidence_uri: ...}
+    placebo: {status: ..., evidence_uri: ...}
+    random_common_cause: {status: ..., evidence_uri: ...}
+    unobserved_common_cause_strength: {status: ..., evidence_uri: ...}
+    data_subset_validation: {status: ..., evidence_uri: ...}
+    scope_gate_reverification: {status: ..., evidence_uri: ...}
+    ite_prediction_coverage_refutation: {status: ..., evidence_uri: ...}
+  aggregate_status: pass | fail | partial_diagnostic_only
   aggregate_policy:
-    pass_requires: all_declared_required_tests_pass
-    partial_output: diagnostic_only              # partial は診断のみ、actionable 結論なし
+    pass_requires: all_declared_required_tests_status_pass
+    fail_when_any_required_test_status_is_fail: true
+    fail_when_any_required_test_status_is_insufficient_data: true
+    not_applicable_requires_preregistered_applicability_manifest: true
+    partial_diagnostic_only_when: never_for_required_tests_only_for_supplementary
+    partial_output: diagnostic_only              # supplementary test の一部欠落時のみ、actionable 結論なし
     fail_close_action: refuse_release_and_notify_reviewer
+  linkage_to_estimator_contract_change_gate:      # refutation fail 時の re-fit 経路
+    on_fail: escalate_to_ecc_gate_L3_or_L4
+    silent_re_run_forbidden: true
 prohibited_actions:
   - release_estimator_result_when_refutation_gate_fail          # fatal
-  - release_estimator_result_when_refutation_gate_partial       # fatal（actionable な数値報告禁止）
+  - release_estimator_result_when_refutation_gate_partial_diagnostic_only  # fatal（actionable 数値報告禁止）
   - reduce_declared_required_tests_after_running                # fatal（事前登録改変）
+  - reclassify_failed_required_test_as_not_applicable_post_hoc  # fatal（applicability manifest は事前登録・凍結）
+  - reclassify_failed_required_test_as_insufficient_data_to_evade_fail  # fatal
   - swap_failing_test_for_another_test                          # fatal
   - report_partial_as_pass                                       # fatal
+  - modify_preregistration_manifest_after_approval              # fatal
 ```
+
+> [!IMPORTANT]
+> **`partial_diagnostic_only` は required test の一部欠落を許容する状態ではありません**。required test のいずれかが `fail` または `insufficient_data` の場合は必ず `fail` になります。`not_applicable` を宣言できるのは **事前登録された applicability manifest に列挙されているケースのみ**——事後に "この test は適用外" と再分類することは fatal。
 
 ### 9.7.2 estimator 別の必須 refutation
 
-| Estimator | E-value | Rosenbaum | Placebo | RCC | Subset | Scope Re-verify |
-|---|---|---|---|---|---|---|
-| PSM / Matching（Ch6） | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| IPW / DR（Ch6） | ✅ | ⚠️（analog） | ✅ | ✅ | ✅ | — |
-| DR-Learner / DML（Ch6） | ✅ | — | ✅ | ✅ | ✅ | — |
-| DiD（Ch7） | ✅（analog） | — | ✅（in-time） | ⚠️ | ✅ | — |
-| IV（Ch7） | ⚠️（exclusion sensitivity） | — | ⚠️ | ✅ | ✅ | — |
-| Synthetic Control（Ch7） | — | — | ✅（in-space + in-time） | ⚠️ | ⚠️（donor LOO） | — |
-| CATE（Ch8） | ✅ | ⚠️（stratum） | ✅ | ✅ | ✅ | ✅ |
-| g-formula（Ch8） | ✅ | — | ✅ | ✅ | ✅ | ✅ |
+| Estimator | E-value | Rosenbaum | Placebo | RCC | UCC Strength | Subset | Scope Re-verify | ITE Coverage |
+|---|---|---|---|---|---|---|---|---|
+| PSM / Matching（Ch6） | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
+| IPW / DR（Ch6） | ✅ | ⚠️（analog） | ✅ | ✅ | ✅ | ✅ | — | — |
+| DR-Learner（Ch6） | ✅ | — | ✅ | ✅ | ✅ | ✅ | — | — |
+| DML（Ch6） | ✅ | — | ✅ | ✅ | ✅（partial R²）| ✅ | — | — |
+| DiD（Ch7） | ✅（analog） | — | ✅（in-time） | ⚠️ | ⚠️ | ✅ | — | — |
+| IV（Ch7） | ⚠️（exclusion sensitivity） | — | ⚠️ | ✅ | ⚠️ | ✅ | — | — |
+| Synthetic Control（Ch7） | — | — | ✅（in-space + in-time） | ⚠️ | — | ⚠️（donor LOO） | — | — |
+| CATE S-Learner（Ch8） | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️（ITE 主張時） |
+| CATE T-Learner（Ch8） | ✅ | ⚠️（stratum） | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ |
+| CATE X-Learner（Ch8） | ✅ | ⚠️ | ✅ | ✅ | ✅ | ✅ | ✅ | ⚠️ |
+| CATE DR-Learner（Ch8） | ✅ | — | ✅ | ✅ | ✅（partial R²）| ✅ | ✅ | ⚠️ |
+| CATE R-Learner（Ch8） | ✅ | — | ✅ | ✅ | ✅（partial R²）| ✅ | ✅ | ⚠️ |
+| g-formula（Ch8） | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | — |
+| ite_labeled_prediction（Ch8） | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | **✅ 必須** |
 
 - ✅：必須
-- ⚠️：analog / 別 framework で代替
-- —：適用外
+- ⚠️：analog / 別 framework で代替（applicability manifest で "analog として代替" を宣言必須）
+- —：適用外（applicability manifest で "not_applicable" を宣言必須）
 
-### 9.7.3 refutation checklist（人間側のレビュー用）
+### 9.7.3 ITE coverage refutation（新規）
+
+`ite_labeled_prediction`（Ch8 §8.6.3）を主張する場合、**個体レベル予測区間の empirical coverage** を Ch9 で必ず検証：
+
+```yaml
+refutation_test: ite_prediction_coverage_refutation
+ite_coverage_config:
+  library: mapie | custom
+  holdout_dataset_uri: <string>
+  holdout_dataset_sha256: <string>
+  prediction_intervals_uri: <string>            # Ch8 の ite_labeled_prediction.prediction_interval_uri
+  target_coverage: 0.9                           # Ch8 の coverage_target と一致必須
+  empirical_coverage: <float>                    # holdout での実測
+  coverage_tolerance: 0.02                       # 例：0.88 - 0.92 なら pass
+  miscoverage_by_stratum_uri: <string>           # 層別で miscoverage を検出（heterogeneous な信頼性）
+  calibration_diagnostic_uri: <string>
+refutation_pass:
+  criterion: |empirical_coverage - target_coverage| <= coverage_tolerance
+             AND max_stratum_miscoverage <= 2 * coverage_tolerance
+  status: pass | fail | insufficient_data
+prohibited_actions:
+  - report_ite_prediction_when_coverage_fails_target       # fatal
+  - use_training_data_for_coverage_verification            # fatal（必ず holdout）
+  - report_average_coverage_only_without_stratum_check     # fatal
+  - loosen_coverage_tolerance_after_seeing_results         # fatal
+```
+
+### 9.7.4 refutation checklist（人間側のレビュー用）
 
 Skill が pass を返しても、**Human review 段階**で以下をチェック：
 
+- [ ] `preregistration_manifest_sha256` と `applicability_manifest_sha256` が事前承認済み
 - [ ] 全 declared_required_tests が事前登録されていたか（後から追加・削除がないか）
-- [ ] 閾値（E-value threshold、Rosenbaum critical_gamma_threshold 等）が事前登録されていたか
-- [ ] placebo seed / subset definition が事前登録されていたか（fishing 防止）
-- [ ] Ch8 scope gate と Ch9 再検証で **status 一致**か
+- [ ] 閾値（E-value threshold、Rosenbaum critical_gamma_threshold、subset pass_threshold、coverage_tolerance 等）が事前登録されていたか
+- [ ] placebo seed / subset definition / gamma_grid が事前登録されていたか（fishing 防止）
+- [ ] Ch8 scope gate と Ch9 再検証で **status 一致**か（audit / data_update モードのどちらか）
 - [ ] vol-03 BNN posterior と E-value の対比が報告に含まれているか
-- [ ] 失敗した test を "適用外" と後付けで再分類していないか
+- [ ] 失敗した test を "not_applicable" と後付けで再分類していないか（applicability manifest との突合）
+- [ ] ITE 主張時に `ite_prediction_coverage_refutation` の empirical coverage が target に一致するか
 
 ---
 
 ## まとめ — 本章のチェックリスト
 
 - [ ] **§9.1 3 層の疑い**——仮定破綻・モデル誤指定・標本の偶然、それぞれに対応する refutation 手法を挙げられる
-- [ ] **§9.2 E-value**——unmeasured confounder への強度スケール、CI 下限での評価、vol-03 BNN posterior との違い（モデル内側 vs 外側）を説明できる
+- [ ] **§9.2 E-value**——effect_direction / ci_bound_closest_to_null の使い分け、連続 outcome での SMD→RR 変換要件、vol-03 BNN posterior との違いを説明できる
 - [ ] **§9.3 Rosenbaum bounds**——PSM / IPW での適用と critical_gamma_threshold の事前登録を説明できる
-- [ ] **§9.4 Placebo / Random common cause / unmeasured confounder strength**——DoWhy の refutation ツール群の使い分けを説明できる
-- [ ] **§9.5 Subset validation**——ARIM の装置別・時期別・組成別 subset 設計を書き下せる
-- [ ] **§9.6 `counterfactual_scope_gate` 再検証**——Ch8 判定を Ch9 で独立再計算する意義と disagreement policy を説明できる
-- [ ] **§9.7 refutation_gate**——estimator 別の必須 test セット、"partial は診断のみ / actionable 数値禁止" の意味、事前登録要件を理解した
+- [ ] **§9.4 Placebo / RCC / UCC strength**——permutation_scheme の W 保護、RCC の absolute vs relative metric、Cinelli-Hazlett partial R² スケールを説明できる
+- [ ] **§9.5 Subset validation**——subset_manifest の凍結、family 別 pass_threshold、multiple testing 制御を書き下せる
+- [ ] **§9.6 Scope gate 再検証**——audit_recompute_same_artifacts と data_update_recompute の 2 モード分離と disagreement policy を説明できる
+- [ ] **§9.7 refutation_gate**——preregistration_manifest hash、applicability manifest の事前凍結、`partial_diagnostic_only` の限定用途、required test failing → aggregate fail の semantics を理解した
+- [ ] **§9.7.3 ITE coverage refutation**——holdout での empirical coverage、stratum 別 miscoverage、tolerance の事前登録を説明できる
 
 ---
 

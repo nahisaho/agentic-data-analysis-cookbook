@@ -87,22 +87,34 @@ did_config:
     pre_periods: [t-3, t-2, t-1]
     test_method: joint_f_test | event_study
     pre_trend_test_uri: <string>
-    p_value_threshold: 0.10              # pre-trend F 検定の下限
+    p_value_threshold: 0.10              # pre-trend F 検定の下限（非拒絶を "pass" とせず補助証拠として扱う）
+    equivalence_test_uri: <string>        # TOST 等の等価性検定（"trend 差が実質ゼロ" の積極的証拠）
+    minimum_detectable_trend: <float>     # 検出力の下限を明示（低検出力での false pass 防止）
+    event_study_plot_uri: <string>        # 各 pre-period coefficient + CI（可視化必須）
   placebo_test_uri: <string>              # Ch9 と共通
+  cluster_diagnostics:
+    n_clusters: <int>
+    few_clusters_policy: <string>          # n_clusters < 10 なら wild cluster bootstrap / randomization inference / 記述統計のみ
+    wild_cluster_bootstrap_uri: <string>   # n_clusters < 10 時に必須
 identification_validity:
   strategy: did
   parallel_trends:
     status: assessed                      # checked にはならない
     evidence_uri: <string>
     conditional_covariates: [...]
+  positivity_by_stratum:                  # Ch6 で必須化：時期 × 装置ごとに処置/対照両方が存在
+    - {key: <string>, min_treated: <int>, min_control: <int>, violation_policy: fail_close}
   dag_of_record_uri: <string>
   dag_of_record_sha256: <string>
+  adjustment_set_approval_uri: <string>   # Ch6 で必須化：conditional_covariates の承認証跡
 prohibited_actions:
   - silently_switch_fixed_effect_structure       # fatal
   - drop_pre_periods_without_review              # fatal（pre-trend 検定の質を下げる）
   - relabel_att_as_ate                           # fatal（estimand mislabeling）
   - use_pre_trend_p_value_below_threshold_without_review  # fatal
+  - report_parallel_trends_pass_on_p_value_only  # fatal（非拒絶のみでの pass 主張禁止：等価性検定 or event-study CI 併用必須）
   - change_cluster_se_level_silently             # fatal
+  - use_analytic_cluster_se_with_fewer_than_10_clusters  # fatal（wild cluster bootstrap 等に切替）
 ```
 
 ### 7.2.4 ARIM ケース：装置較正プロトコル刷新
@@ -114,32 +126,33 @@ prohibited_actions:
 - 期間：2025 Q1 〜 2026 Q4（8 四半期）
 
 **Skill 実行フロー**：
-1. **pre-trend assessment**：2025 Q1 〜 2026 Q1（処置前 5 四半期）で装置 A vs B のトレンド差を event study 回帰、p > 0.10 を確認
-2. **DiD 回帰**：unit + time FE、cluster SE を装置レベル
+1. **pre-trend assessment**：2025 Q1 〜 2026 Q1（処置前 5 四半期）で装置 A vs B のトレンド差を event study 回帰、p > 0.10 **かつ**等価性検定 pass **かつ**event-study CI がゼロ近傍
+2. **DiD 回帰**：unit + time FE、cluster SE を装置レベル——**ただし本ケースは 2 装置のみ（n_clusters = 2）→ 解析的 cluster SE は無効**。**wild cluster bootstrap または randomization inference に切替**、事後承認を受ける。装置数を増やせない場合は記述統計 + SC（§7.4）に切替を検討
 3. **placebo test**：仮想処置を 2025 Q4（実際は変更なし時点）に置いて 0 に近いか確認
-4. **artifact 出力**：`att_estimate`, `ci`, `pre_trend_test_uri`, `placebo_test_uri`
+4. **artifact 出力**：`att_estimate`, `ci`, `pre_trend_test_uri`, `equivalence_test_uri`, `event_study_plot_uri`, `placebo_test_uri`, `wild_cluster_bootstrap_uri`
 
 ### 7.2.5 DiD の拡張（本章の scope 外）
 
-- **Staggered DiD**（処置タイミングが unit ごとに異なる）：Callaway-Sant'Anna / Sun-Abraham 推定量——**heterogeneous treatment effect が絡む場合の bias 修正**が必要（`differencesindifferences` / `did` パッケージ、または Ch8 の CATE と組み合わせ）
+- **Staggered DiD**（処置タイミングが unit ごとに異なる）：**素朴な two-way fixed effect (TWFE) は heterogeneous treatment effect 下で負の重みを割り当て**、estimand が解釈不能になる（Goodman-Bacon 2021、de Chaisemartin-D'Haultfœuille 2020）。**Skill 契約は staggered adoption では TWFE を fail-close**、Callaway-Sant'Anna / Sun-Abraham / de Chaisemartin-D'Haultfœuille 推定量を必須とする（`differencesindifferences` / `did` パッケージ、または Ch8 の CATE と組み合わせ）。均質効果の理論的正当化がある場合のみ TWFE 使用可、その場合も `homogeneity_justification_uri` を必須。
 - **Synthetic DiD**（SDID）：Arkhangelsky et al. (2021)——本章では触れず、Ch7 SC 節との接続を軽く言及
 
 ---
 
 ## 7.3 IV（Instrumental Variables）— Skill 化
 
-### 7.3.1 3 仮定の operational 判定
+### 7.3.1 4 仮定の operational 判定
 
-第5章 §5.4.1 で列挙した 3 仮定を、**Skill が判定可能な形**にします：
+第5章 §5.4.1 で列挙した 3 仮定に加え、**LATE を identify するには monotonicity（no-defiers）が第 4 の仮定**として必要です。**Skill が判定可能な形**で 4 仮定を列挙します：
 
 | 仮定 | 経験的判定 | 契約項目 | 破綻時の対応 |
 |---|---|---|---|
-| **Relevance**：$Z \to T$ 強度 | first-stage F 統計量（rule of thumb: F > 10） | `first_stage_f_stat`, `first_stage_f_threshold: 10` | weak instrument → fail-close |
+| **Relevance**：$Z \to T$ 強度 | first-stage F、**Kleibergen-Paap rk Wald F**（クラスタ/ロバスト対応）、**Montiel Olea-Pflueger effective F**（複数 IV / robust） | `first_stage_f_stat`, `kleibergen_paap_rk_wald_f`, `montiel_olea_pflueger_effective_f`, `first_stage_f_threshold: 10` | weak instrument → fail-close |
 | **Exclusion restriction**：$Z \not\to Y$ 直接 | 経験的検定は困難（理論的正当化が主）、over-identification test（$Z$ が複数なら Sargan-Hansen） | `exclusion_justification_uri`, `overid_test_uri` | 理論的正当化不足 → Human review 必須 |
 | **Exchangeability**：$Z \perp U$ | 観測共変量とのバランス、DAG での正当化 | `iv_balance_report_uri` | バランス崩壊 → 追加 covariate 制御 or fail-close |
+| **Monotonicity（no-defiers）**：$Z$ が変わっても "反対方向に" 処置を変える unit が存在しない | 経験的検定は原則不可能——**ドメイン論拠での宣言**（LATE を語る前提条件） | `monotonicity_argument_uri`, `no_defiers_argument_uri` | 論拠不足 → LATE 主張不可 → estimand ラベル剥奪 |
 
 > [!WARNING]
-> **Exclusion restriction は経験的にはほぼ検証不可能**——`assessed` にすら達しない場合が多く、**Human review + DAG レベルの正当化**が事実上必要です。**IV の妥当性は Skill 単独では確定できない**——`iv_approval_skill`（§7.5）で Human ゲートを通す設計にします。
+> **Exclusion restriction は経験的にはほぼ検証不可能**——`assessed` にすら達しない場合が多く、**Human review + DAG レベルの正当化**が事実上必要です。**Monotonicity も同様に理論宣言**——両者とも Skill 単独では確定できず、`iv_approval_skill`（§7.5）で Human ゲートを通す設計にします。第一段の弱操作変数は robust/クラスタ対応の Kleibergen-Paap F または Montiel Olea-Pflueger effective F で判定してください（heteroskedastic/clustered 環境では単純な first-stage F の 10 ルールは不十分）。
 
 ### 7.3.2 estimand の明示（LATE / 2SLS / ATE）
 
@@ -166,24 +179,34 @@ iv_config:
   endogenous_regressors: [T]
   exogenous_regressors: [X1, X2, ...]        # exclusion restriction を尊重する共変量
   cluster_se: <string>                       # クラスタ変数
-  first_stage_f_stat: <float>                # Skill 実行後に出力
-  first_stage_f_threshold: 10
+  covariance_type: robust | cluster | hac    # 検定・F 統計量に整合させる
+  first_stage_f_stat: <float>                # 単純 F（参考値）
+  kleibergen_paap_rk_wald_f: <float>          # robust/cluster 対応の弱操作変数 F
+  montiel_olea_pflueger_effective_f: <float>  # 複数 IV / robust 環境
+  first_stage_f_threshold: 10                 # cluster/robust 環境では Kleibergen-Paap F に適用
   overid_test:
     method: sargan | hansen_j
     p_value_threshold: 0.10                  # 下回れば instrument invalidity 疑い
     overid_test_uri: <string>
   exclusion_justification_uri: <string>       # 理論的正当化文書（Human 生成）
+  monotonicity_argument_uri: <string>         # no-defiers のドメイン論拠（Human 生成）
 identification_validity:
   strategy: iv
   iv_assumptions:
-    relevance: {status: assessed, evidence: first_stage_f_stat}
+    relevance: {status: assessed, evidence: kleibergen_paap_rk_wald_f}
     exclusion: {status: declared, evidence_uri: exclusion_justification_uri, human_reviewed: true}
     exchangeability: {status: assessed, evidence_uri: iv_balance_report_uri}
+    monotonicity: {status: declared, evidence_uri: monotonicity_argument_uri, human_reviewed: true}
+  positivity_by_stratum:                      # Ch6 で必須化：Z の各水準で T = 0/1 両方が存在
+    - {key: <string>, min_treated: <int>, min_control: <int>, violation_policy: fail_close}
   dag_of_record_uri: <string>
   dag_of_record_sha256: <string>
+  adjustment_set_approval_uri: <string>       # Ch6 で必須化：exogenous_regressors の承認証跡
 prohibited_actions:
-  - proceed_with_first_stage_f_below_threshold      # fatal（weak instrument）
+  - proceed_with_first_stage_f_below_threshold      # fatal（weak instrument；robust 環境では Kleibergen-Paap F に適用）
+  - use_naive_first_stage_f_under_heteroskedastic_or_clustered_errors  # fatal（Kleibergen-Paap / Montiel Olea-Pflueger 必須）
   - proceed_without_exclusion_justification         # fatal（Human review 未実施）
+  - report_late_without_monotonicity_argument       # fatal（monotonicity なしに LATE 主張禁止）
   - silently_add_instruments                        # fatal（instrument 集合の変更は §7.5 承認）
   - relabel_late_as_ate                             # fatal（estimand mislabeling）
   - drop_overid_test_when_multiple_instruments      # fatal
@@ -236,7 +259,7 @@ estimand_type: itt_single_unit             # 1 unit の intent-to-treat 相当
 sc_config:
   library: causalpy | synthdid
   library_version: <string>
-  method: original_abadie | augmented_sc | synthetic_did
+  method: original_abadie | augmented_sc | bayesian_sc | synthetic_did
   treated_unit: <string>
   donor_pool_uri: <string>                  # 承認済み donor リスト
   donor_pool_sha256: <string>
@@ -249,29 +272,49 @@ sc_config:
     solver: quadprog | slsqp
   pre_treatment_fit:
     pre_treatment_rmse: <float>
-    rmse_threshold: <float>                 # データ scale に応じ設定
+    rmse_threshold: <float>                 # 下記 scale justification のいずれかで正当化必須
+    rmse_scale_justification:
+      normalized_rmse: <float>              # outcome の pre-period SD で正規化
+      pre_period_sd_ratio: <float>          # RMSE / pre-period SD の閾値（例: < 0.1）
+      domain_threshold_uri: <string>         # ドメインで許容される測定誤差レベル文書
     fit_plot_uri: <string>
   weight_sparsity:
     effective_donor_count_min: 3
     weights_uri: <string>
+  bayesian_uncertainty:                     # bayesian_sc / causalpy 使用時は必須
+    posterior_effect_uri: <string>
+    credible_interval_level: 0.95
+    posterior_predictive_check_uri: <string>
   placebo_analysis:
-    method: leave_one_out | in_space | in_time
-    placebo_distribution_uri: <string>
-    treated_effect_percentile_threshold: 0.90  # 実効果が placebo 分布の上位 10% にあるべき
+    in_space_placebo:                        # 必須：donor unit を仮想 treated に
+      method: leave_one_out
+      placebo_distribution_uri: <string>
+      treated_effect_percentile_threshold: 0.90  # 実効果が placebo 分布の上位 10% にあるべき
+    in_time_placebo:                         # 必須：処置前の "仮想処置時点" で 0 効果を確認
+      pseudo_treatment_period: <string>
+      placebo_distribution_uri: <string>
+      max_pseudo_effect_threshold: <float>
 identification_validity:
   strategy: synthetic_control
   donor_pool_assumption:
     status: assessed
     evidence_uri: <string>
-  no_spillover_assumption:
+  no_spillover_assumption:                  # SUTVA 系
     status: declared
     evidence_uri: <string>
+  positivity_by_stratum: not_applicable      # SC は single-unit ITT のため層別 positivity 不適用
+  positivity_not_applicable_rationale: <string>  # 代替として donor_pool の pre-period 支持で担保
+  dag_of_record_uri: <string>               # Ch6 で必須化
+  dag_of_record_sha256: <string>            # Ch6 で必須化
+  adjustment_set_approval_uri: <string>     # covariates 使用時は承認証跡
 prohibited_actions:
   - add_donor_units_after_fitting                    # fatal（cherry-picking）
   - remove_donor_units_to_improve_fit                # fatal（overfitting）
   - use_donor_that_experienced_similar_treatment     # fatal（SUTVA / no spillover 違反）
-  - report_effect_without_placebo_analysis           # fatal
+  - report_effect_without_in_space_and_in_time_placebos  # fatal（両方必須）
   - proceed_with_pre_treatment_rmse_above_threshold  # fatal
+  - use_raw_rmse_threshold_without_scale_justification  # fatal（scale 依存回避）
+  - report_bayesian_sc_without_credible_interval     # fatal（bayesian_sc 使用時）
 ```
 
 ### 7.4.4 ARIM ケース：単一装置の較正プロトコル刷新
@@ -345,8 +388,52 @@ prohibited_actions:
 ### 7.5.3 donor pool にも同じ設計
 
 **Synthetic Control の donor pool 選定**も 2 Skill に分離：
-- `donor_pool_proposal_skill`（エージェント自律：候補列挙 + pre-fit RMSE 評価）
-- `donor_pool_approval_skill`（Human 承認：**類似処置を受けた unit の除外**、SUTVA / no spillover 判定）
+
+```yaml
+skill_type: donor_pool_proposal_skill
+authorization_level: agent_autonomous
+inputs:
+  - dataset_uri
+  - treated_unit
+  - candidate_donors: [...]                # ドメインエキスパートが列挙した候補 unit
+  - candidate_universe_frozen_at: <timestamp>  # 事後追加を封じる
+outputs:
+  - pre_fit_rmse_per_donor_subset_uri
+  - similarity_treatment_evidence_uri       # 各 donor が受けた類似処置の履歴
+  - spillover_diagnostics_uri
+  - proposal_bundle_sha256
+prohibited_actions:
+  - propose_donor_not_in_candidate_universe          # fatal
+  - modify_candidate_universe_after_freeze           # fatal
+  - use_post_treatment_outcome_to_select_donors      # fatal（look-ahead bias）
+  - promote_donor_to_final_pool_without_approval     # fatal
+```
+
+```yaml
+skill_type: donor_pool_approval_skill
+authorization_level: human_required
+authorization_gate: variable_selection_authorization
+inputs:
+  - proposal_bundle_sha256
+  - similarity_treatment_evidence_uri
+  - spillover_diagnostics_uri
+  - reviewer_comments_uri
+outputs:
+  - approved_donor_pool_uri
+  - donor_pool_sha256
+  - approval_evidence:
+      - reviewer_signatures
+      - approval_timestamp
+      - exclusion_decisions_uri            # どの候補を除外し理由は何か
+      - no_spillover_signoff_uri
+approver: causal_review_board
+approver_independence:
+  conflict_policy: independent_reviewer_required_if_approver_is_data_producer
+prohibited_actions:
+  - approve_without_reviewer_signatures                    # fatal
+  - approve_donor_that_experienced_similar_treatment       # fatal（SUTVA / no spillover 違反）
+  - approve_donor_pool_that_shrinks_effective_donor_count_below_min  # fatal
+```
 
 ---
 
@@ -372,20 +459,33 @@ prohibited_actions:
 | IV | LATE（or 2SLS estimand） | linearmodels, DoWhy | 高（exclusion 正当化） |
 | Synthetic Control | ITT (single unit) | causalpy, synthdid | 高（donor 選定） |
 
+### 7.6.1 仮定破綻時の fail-close 挙動
+
+**エージェントが仮定失敗時に別戦略へ silent に fallback することは禁止**。以下の fail-close 挙動を Skill 契約で強制します：
+
+| 失敗した仮定 | 現在の戦略 | fail-close 挙動 | 別戦略への切替条件 |
+|---|---|---|---|
+| positivity 違反（backdoor） | backdoor | **停止**——estimand を trimmed 版に変更するか、estimator を変える | `estimator_contract_change_gate` + `variable_selection_authorization` |
+| parallel trends 破綻（DiD） | DiD | **停止**——SC または IV への切替は Human 承認必須 | `estimator_contract_change_gate` + `dag_authorization`（DAG 見直しあり時） |
+| weak instrument（IV） | IV | **停止**——IV 候補追加 / 別 IV への切替は §7.5 `iv_approval_skill` を通す | `iv_approval_skill` + `estimator_contract_change_gate` |
+| pre-fit RMSE 超過（SC） | SC | **停止**——donor pool 変更は §7.5.3 `donor_pool_approval_skill` を通す | `donor_pool_approval_skill` + `estimator_contract_change_gate` |
+| in-space / in-time placebo で有意効果（SC） | SC | **停止**——効果報告禁止、感度分析（Ch9）へ | `estimator_contract_change_gate` |
+
 > [!IMPORTANT]
-> **識別戦略を silent に切り替えることは fatal**（第4章 Table 4.4 item 2）。エージェントが「backdoor で positivity 違反だから IV に切り替える」等の判断は、**必ず `variable_selection_authorization` および `dag_authorization` を通す**——第5章 §5.6 の DAG amendment protocol と整合させる必要があります。
+> **識別戦略を silent に切り替えることは fatal**（第4章 Table 4.4 item 2）。エージェントが「backdoor で positivity 違反だから IV に切り替える」等の判断は、**必ず `variable_selection_authorization`、`dag_authorization`、および `estimator_contract_change_gate`（Ch6 §6.7）の三層すべてを通す**——第5章 §5.6 の DAG amendment protocol と整合させる必要があります。**fail-close の初期挙動は "停止"** であり、"他戦略への自動切替" ではありません。
 
 ---
 
 ## まとめ — 本章のチェックリスト
 
-- [ ] **§7.2 DiD の parallel trends assumption**——`assessed` レベルまでしか達しない理由と、pre-trend / placebo test の役割を説明できる
-- [ ] **§7.2.3 DiD Skill 契約**——fixed effect 構造 / cluster SE / pre_trend p-value threshold を書き下せる
-- [ ] **§7.3 IV 3 仮定の operational 判定**——特に exclusion restriction が経験的にほぼ検証不可能な理由と、Human review 必須性を理解した
-- [ ] **§7.3.2 IV の estimand**——LATE / 2SLS estimand / ATE の使い分けを説明できる
-- [ ] **§7.4 Synthetic Control の donor pool governance**——placebo analysis と類似処置 unit 除外の必然性を理解した
+- [ ] **§7.2 DiD の parallel trends assumption**——`assessed` レベルまでしか達しない理由と、pre-trend / placebo / 等価性検定 / event-study CI の役割を説明できる
+- [ ] **§7.2.3 DiD Skill 契約**——fixed effect 構造 / cluster SE / few-clusters 対応 (wild cluster bootstrap) / pre_trend の p-value + equivalence + minimum detectable trend を書き下せる
+- [ ] **§7.2.5 Staggered DiD**——TWFE の負重み問題と Callaway-Sant'Anna / Sun-Abraham の必要性を説明できる
+- [ ] **§7.3 IV 4 仮定の operational 判定**——relevance（Kleibergen-Paap / Montiel Olea-Pflueger）、exclusion、exchangeability、monotonicity（no-defiers）の役割と Human review 必須性を理解した
+- [ ] **§7.3.2 IV の estimand**——LATE / 2SLS estimand / ATE の使い分けと monotonicity なしに LATE 主張禁止のルールを説明できる
+- [ ] **§7.4 Synthetic Control の donor pool governance**——in-space + in-time placebo 両方必須、pre-fit RMSE の scale justification、Bayesian SC の credible interval 報告義務を理解した
 - [ ] **§7.5 IV / donor pool の proposal vs approval Skill 分離**——第5章 §5.6 の設計原則が同じ構造で拡張できることを理解した
-- [ ] **§7.6 識別戦略比較表**——自分の状況で backdoor / DiD / IV / SC のどれが第一選択かを判断できる
+- [ ] **§7.6 識別戦略比較表 + fail-close 挙動**——silent fallback 禁止、`estimator_contract_change_gate` を通す必要性を判断できる
 
 ---
 

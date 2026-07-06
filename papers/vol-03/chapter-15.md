@@ -878,7 +878,7 @@ never_allowed:
 
 **W14-4**: AG-04 (log 改ざん / cherry-picking) を検知するために、実行 registry の run 数とレポート内の runs_summary の run 数を比較する signal を実装せよ。差集合が空でない場合、report 発行を block せよ。
 
-**W14-5**: MX-01 (chain 内 SHA 不整合) を検知するため、`foundation_model_provenance.commit_sha` と `ssl_pretrain_provenance.base_model_sha` を突合するチェックを実装せよ。不一致時、監査レポートに evidence を添えて HIGH で fail するように書け。
+**W14-5**: MX-01 (chain 内 SHA 不整合) を検知するため、`foundation_model_provenance.revision_commit_hash`（Ch11 canonical, 40-hex）と `ssl_pretrain_provenance.base_model_revision_commit_hash`（§ 14.7 `provenance_field_normalization.ch12_ssl_base_model_sha` で解決される canonical name）を突合するチェックを実装せよ。不一致時、監査レポートに evidence を添えて HIGH で fail するように書け。
 
 **W14-6**: Experiment tracking (MLflow) を導入した場合と導入しない場合で、同じ研究プロジェクトの provenance chain がどう変わるかを diff せよ。tracking run ID が capstone provenance に追記される場所を特定し、`replace_capstone_provenance_with_tracking_ui_only: never_allowed` の妥当性を議論せよ。
 

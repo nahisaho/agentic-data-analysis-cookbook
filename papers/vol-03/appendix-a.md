@@ -814,15 +814,31 @@ extends: "vol-02/A.7"                                  # vol-02 fields inherited
 # Section 1: Reproducibility (deep-specific additions)
 # vol-02 は python / package_versions / random_seed をカバー済み。
 # 以下は GPU 実行環境と framework 詳細のみ追加。
+#
+# --- Container naming note (v0.2, additive) ---
+# 本 Section の GPU / cuDNN / TF32 / seed / framework 系フィールドは、
+# Ch15 §14.7 の canonical name では `layer_3.gpu_environment_provenance.*`
+# という nested container 名で参照される（signal_selector の jsonpath prefix）。
+# 実装では以下の 2 通りが等価：
+#   (a) top-level 展開（本 schema の記法。可読性優先）
+#   (b) `gpu_environment_provenance:` 配下に nest（Ch15 signal_selector 記法）
+# provenance emitter は (a)/(b) いずれかを選択可、Ch14 audit の
+# provenance_field_normalization 辞書がフィールド解決を行う。
+# 参照：Ch15 §14.7 の `ch04_gpu_environment` エントリ、DG-01 signal_selector。
 # ============================================================
 gpu_backend:
   vendor: "nvidia | amd | apple | cpu_only"
   driver_version: "string"
   cuda_or_rocm_version: "string"
+  cudnn_version: "string"                                # Ch15 DG-01 検出シグナル
+  gpu_arch: "string (e.g., sm_80, sm_90)"                # Ch15 DG-01 検出シグナル
   device_model: "e.g., A100-80GB"
   device_count: "int"
 cudnn_deterministic: "bool"
 cudnn_benchmark: "bool"                                # false 推奨
+torch_deterministic_algorithms: "bool"                 # torch.use_deterministic_algorithms(True)
+cublas_workspace_config: "string (:4096:8 推奨)"        # 起動時 import 前に export
+tf32_allowed: "bool"                                   # Ch14 DG-01 canonical signal（付録C §6）
 random_seed_per_worker: "int (torch DataLoader workers)"
 numpy_seed: "int"                                      # vol-02 random_seed とは別種
 python_hash_seed: "int"                                # PYTHONHASHSEED
@@ -840,6 +856,12 @@ augmentation_provenance:
   policy_name: "string"
   policy_hash: "sha256"                                # 学習・推論で一致
   augmentation_applied_only_on_train: true             # Ch5
+  # --- Policy change gate (Ch15 §15.5 AG-07 / DG-06 対策契約) ---
+  # augmentation policy を実行時に変更する場合は Human 承認 gate を通す。
+  # 「後段章による静かな置換」（Ch15 MX-03）と「agent-side の精度偽装」（AG-07）
+  # の両方をカバーする canonical policy field。
+  augmentation_policy_change_requires_gate: true       # Ch5/Ch15 canonical
+  augmentation_policy_signed_hash_matched_at_runtime: true  # Ch5 canonical (DG-06)
   test_time_augmentation:
     enabled: "bool"
     declared_ops: "list"
@@ -944,14 +966,34 @@ agent_authorization:
   checkpoint_silent_overwrite_detected: false
 
 # ============================================================
-# Section 7: FM update gate (Ch11)
+# Section 7: FM update gate (Ch11/Ch12)
+# canonical field 名は Ch11 fm_update_gate + Ch12 §12.7 fm_update_gate.yaml。
+# Ch15 §14.7 では `ch11_fm_update_gate: "fm_update_gate_provenance"` として
+# 正規化される（provenance emitter は `fm_update_gate` / `fm_update_gate_provenance`
+# いずれの命名でも可、normalization 辞書で解決）。
 # ============================================================
 fm_update_gate:
+  # --- Record fields (provenance に記録される事実) ---
   applied: "bool"
-  gate_id: "sha256 or null"
+  gate_id: "sha256 or null"                            # 承認レコードの一意 ID
   approver_role: "e.g., project_lead + facility"
-  approver_is_non_agent: "bool"
+  approver_is_non_agent: "bool"                        # true 必須（Ch11/Ch15 AG-02）
   hub_api_resolved_sha_at_approval: "40-hex"
+  decision: "accept | defer_to_human | reject | signature_fail | null"   # Ch12 §12.7 canonical
+  # --- Policy fields (契約として never_allowed / required を宣言) ---
+  # Ch15 §15.5 AG-02 / §15.4 DG-02 の対策契約として参照される boolean policies。
+  # これらは skill_contract 側で pin し、fm_update_gate_provenance では
+  # policy_snapshot として同じ boolean を record する。
+  policy:
+    fm_update_gate_required_if_using_fm: true                          # Ch11 canonical
+    fm_update_gate_required_before_default_version_change: true        # Ch11/Ch15 AG-02
+    self_sign_as_fm_update_gate_approver: "never_allowed"              # Ch15 AG-02（別名 self_sign_as_approver）
+    fm_default_version_change_without_gate: "never_allowed"            # Ch15 AG-02
+    skip_shadow_deploy: "never_allowed"                                # Ch12 §12.7
+    min_shadow_samples_total: "int"                                    # Ch12 §12.7
+    min_samples_per_stratum: "int"                                     # Ch12 §12.7
+    revision_must_be_40hex_commit_sha: true                            # Ch12 §12.7 / Ch15 AG-08
+    hub_api_resolved_sha_must_match_revision: true                     # Ch12 §12.7
 
 # ============================================================
 # Section 8: Uncertainty stop (Ch8-9-13)
@@ -1086,6 +1128,96 @@ responsibility_ledger_entry:                           # Ch15 canonical, split p
 | `audit_result_provenance` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Ch14 |
 | `model_distribution_contract_ref` | if_distributed | if_distributed | if_distributed | if_distributed | if_distributed | if_distributed | if_distributed | Ch15 |
 | `responsibility_ledger_entry` | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Ch15 |
+
+### A.9.2 Canonical Gate & Policy Field Reference
+
+> [!IMPORTANT]
+> 本節は vol-03 全体で使われる **Gate 名 / policy field 名の canonical 一覧** です。Ch4-Ch15 の各章で登場するフィールド名の**正本**を集約し、章間の表記ゆれ（`_gate` suffix の有無、Ch15 signal_selector 記法との差）を防ぎます。Ch14/Ch15 の `provenance_field_normalization` はここに列挙された canonical name を解決対象とします。
+
+**Gate 名一覧（承認レコードを生成する gate）**
+
+| Gate | Canonical field name | 定義章 | Ch15 alias（signal_selector） | 承認者 required_roles |
+|---|---|---|---|---|
+| 学習ジョブ承認 | `agent_authorization.training_job_approval` | Ch4 / Ch5 §5.7 / Ch7 §7.x | `layer_3.training_job_approval` | `ml_lead` or `pi` |
+| Fine-tune 起動（capstone） | `gate_state_machine.gate1_fine_tune_launch` | Ch13 §13.x | `capstone_three_gate_orchestrator_provenance.gate1_resolution` | `any_of: [ml_lead, pi]` |
+| 停止後 disposition | `gate_state_machine.gate2_post_stop_disposition` | Ch13 §13.x | `...gate2_resolution` | `statistician AND pi` |
+| 診断緩和・pooling 変更 | `gate_state_machine.gate3_diagnostic_relaxation_or_pooling_change` | Ch13 §13.x | `...gate3_resolution` | `statistician AND pi` (`reviewers_min: 2`) |
+| FM 更新 | `fm_update_gate` | Ch11 / Ch12 §12.7 | `fm_update_gate_provenance` | `project_lead + facility`（`approver_is_non_agent: true`） |
+| 不確かさ停止 | `uncertainty_stop_threshold` / `uncertainty_stop_gate` | Ch5 §5.7 / Ch8-9 / Ch13 | `uncertainty_stop_gate` | `statistician` (Gate2 に routing) |
+| Checkpoint 上書き承認 | `checkpoint_overwrite_policy` (enum) + `training_job_approval` (承認レコード) | Ch4 canonical | `layer_3.checkpoint_overwrite_policy` | policy が `overwrite_with_approval` のとき Human 承認必須 |
+| Augmentation policy 変更 | `augmentation_policy_change_requires_gate` (bool policy) | §A.9 Section 2 / Ch5 / Ch15 AG-07 | `layer_2_augmentation.augmentation_policy_signed_hash` | 変更時に Gate1 or 独立 gate |
+
+**Policy field 一覧（`never_allowed` / `required` boolean を宣言する contract field）**
+
+| Category | Policy field | 定義 | 参照 |
+|---|---|---|---|
+| GPU 決定論 | `layer_3.gpu_environment_provenance_required: true` | Section 1 | Ch15 DG-01 |
+| GPU 決定論 | `layer_3.deterministic_config_signed: true` | Section 1 | Ch15 DG-01 |
+| Split | `layer_3.split_hashes_pairwise_disjoint_verified: true` | Ch4 / Ch5 | Ch15 DG-03 |
+| Augmentation | `augmentation_policy_change_requires_gate: true` | Section 2 (new) | Ch15 AG-07 / DG-06 |
+| Augmentation | `no_augmentation_across_splits: never_allowed` | Ch5 | Ch15 DG-03 |
+| Checkpoint | `checkpoint_overwrite_policy: append_only` (enum) | Section 6 | Ch4 canonical |
+| Checkpoint | `agent_silent_checkpoint_overwrite: never_allowed` | Ch4 | Ch15 AG-03 |
+| Checkpoint | `overwrite_checkpoint_uri: never_allowed` | Ch13 | Ch13 §13.x |
+| Training | `training_job_approval_signed: true` | Ch4 / Ch7 | Ch13 |
+| Training | `launch_without_training_job_approval: never_allowed` | Ch4 / Ch7 / Ch13 | Ch13 §13.x |
+| GPU budget | `gpu_budget_signed_and_enforced: true` | Ch4 | Ch15 AG-01 |
+| GPU budget | `agent_ignoring_gpu_budget: never_allowed` | Ch4 | Ch15 AG-01 |
+| FM update | `fm_update_gate_required_if_using_fm: true` | Section 7 | Ch11 |
+| FM update | `fm_update_gate_required_before_default_version_change: true` | Section 7 | Ch15 AG-02 |
+| FM update | `self_sign_as_fm_update_gate_approver: never_allowed`（別名: `self_sign_as_approver`） | Section 7 | Ch15 AG-02 |
+| FM update | `fm_default_version_change_without_gate: never_allowed` | Section 7 | Ch15 AG-02 |
+| FM update | `skip_shadow_deploy: never_allowed` | Section 7 | Ch12 §12.7 |
+| FM verify | `fm_load_without_verify: never_allowed` | Ch11 | Ch15 AG-08 |
+| FM verify | `direct_hub_api_call_bypassing_registry: never_allowed` | Ch11 | Ch15 AG-08 |
+| Inference | `inference_sha_must_match_signed_default: true` | Ch11 | Ch15 AG-05 |
+| Inference | `shadow_deploy_confused_with_production: never_allowed` | Ch11 | Ch15 AG-05 |
+| Inference | `rollback_without_gate: never_allowed` | Ch11 | Ch15 AG-05 |
+| Gate integrity | `self_sign_by_agent_forbidden: true` | Ch13 | Ch15 AG-06 |
+| Gate integrity | `bypass_gate_by_downgrading_thresholds: never_allowed` | Ch13 | Ch15 AG-06 |
+| Report | `report_must_include_all_registered_runs: true` | Ch10 | Ch15 AG-04 |
+| Report | `agent_cherry_picking_runs_in_report: never_allowed` | Ch10 | Ch15 AG-04 |
+| Continual | `model_version_bump_requires_gate: true` | Ch11 | Ch15 AG-09 |
+| Continual | `continual_learning_without_notification: never_allowed` | Ch11 | Ch15 AG-09 |
+| Continual | `silent_re_learning_event: never_allowed` | Ch11 | Ch15 AG-09 |
+
+**Naming convention（表記ゆれ解消ルール）**
+
+| ルール | 良い例 | 避ける |
+|---|---|---|
+| Gate レコードフィールドは container 名 + `_approval` / `_gate` | `training_job_approval`, `fm_update_gate` | `training_job_gate`, `fm_update_approval` |
+| Policy boolean は `_required` / `_forbidden` / `_signed` / `never_allowed` | `training_job_approval_signed`, `self_sign_by_agent_forbidden` | `training_job_signed`, `no_self_sign` |
+| Gate 状態は `gate_state_machine.<gate_id>_<purpose>.state` | `gate1_fine_tune_launch`, `gate2_post_stop_disposition` | `gate1`, `stop_gate` |
+| Ch15 signal_selector は canonical name の JSONPath | `$..fm_update_gate.gate_id` | `$..fm_gate_id` |
+
+### A.9.3 `training_job_approval` — canonical schema（v0.2）
+
+> [!NOTE]
+> `training_job_approval` は Ch4 canonical で `agent_authorization` 配下に nest されます（§A.9 Section 6）。Ch6 §6.x / Ch7 §7.x では簡略記法（`training_job_approval_id` のみ）を許容しますが、provenance emitter は下記 canonical schema を出力すること。Ch15 §14.7 `provenance_field_normalization.ch04_training_job_approval` により、両記法が解決されます。
+
+| Field | Type | Required | 定義章 | 補足 |
+|---|---|:-:|---|---|
+| `required` | bool | ✅ | Ch4 | 学習ジョブに承認が必須か |
+| `approval_record_id` | sha256 (canonical) or "APP-YYYY-MMDD-NN"（Ch5/Ch7 の運用形式） | ✅ | Ch4 | 承認レコード ID。Ch6 の `training_job_approval_id` はこれと同一 |
+| `approver_identity` | opaque_id_or_pubkey | ✅ | Ch4 | approver の pubkey hash |
+| `approver_role` | string enum | ✅ | Ch4 | `pi`, `ml_lead`, `facility_committee` 等 |
+| `approver_is_non_agent` | bool | ✅ | Ch4 | **`true` 必須**（Ch15 AG-06） |
+| `approved_at_utc` | ISO8601 | ✅ | Ch4 | 承認時刻 |
+| `approval_scope` | enum: `individual` \| `batched` | 任意 | Ch4 | batch 承認可否 |
+| `approved_hp_range` | dict | ✅ | Ch4 / Ch5 §5.7 / Ch7 §7.x | lr / batch_size / epochs の許容範囲。inline or ref |
+| `approved_hp_range_snapshot` | dict | ✅ | Ch4 | 承認時点の凍結 snapshot（runtime 変更検知） |
+| `parent_authorization_id` | string or null | 任意（v0.2 で null 固定） | Section 6 design note | **意図的に self-contained gate**。vol-04 L3 の子ではない。詳細は Section 6 のコメント参照 |
+
+**Back-references（実装側の scattered 定義箇所）**
+
+- Ch4 §4.x — 概念定義（agent tier と `training_job_approval` の関係）
+- Ch5 §5.7 — Skill 契約フィールドとしての `training_job_approval` + `approved_hp_range` の記法例
+- Ch6 §6.x — 簡略記法 `training_job_approval_id` の使用例（`approval_record_id` に解決）
+- Ch7 §7.x — 実装コード（`_startup_asserts` の [C] エージェント権限で検証）
+- Ch8 §8.x — `partial` disposition 時の `required_gate: "training_job_approval"` 参照
+- Ch13 §13.x — `gate1_fine_tune_launch` との対応関係（`training_job_approval` はこの gate の provenance record）
+- Ch15 §15.5 — AG-01/AG-03 の対策契約として参照
+- Ch16 §16.x — L3 運用時の `training_job_approval_required_for_L3: true`
 
 ---
 

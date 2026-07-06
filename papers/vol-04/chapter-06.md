@@ -57,6 +57,9 @@ $$e(x) = P(T = 1 \mid X = x)$$
 > [!IMPORTANT]
 > 第0章で導入した**4 識別仮定のなかで `checked` を経験的に主張できるのは positivity のみ**——SUTVA / consistency / exchangeability は理論的仮定であり、propensity 図で "見える" のは positivity だけです。**Skill 契約 (`identification_validity`) では `positivity: {status: checked, evidence: propensity_overlap_plot_uri}` を必須**にします（第4章 §4.9 テンプレート）。
 
+> [!NOTE]
+> **`positivity_by_stratum` の shape**：本章の propensity model / matching / IPW / DR / DML 契約では、コンパクトさのため **`positivity.by_stratum` を nested object**（単一 stratum-key）で記述しますが、**canonical shape は Ch4 §4.4.1 の list-of-objects**（複数 stratification 軸対応）です。単一 stratification 軸で十分な場合は nested 形が下位互換 syntactic sugar として使えますが、複数軸（例：装置 × 組成 bin）を扱う場合は必ず canonical list 形に展開してください。Ch7-8 の estimator は list 形を直接使用します。
+
 ### 6.2.3 propensity model の Skill 契約項目
 
 ```yaml

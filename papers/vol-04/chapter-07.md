@@ -2,7 +2,7 @@
 
 > **本章の到達目標**
 > - **backdoor が使えない**（未観測交絡が残る）観測データに対して、**準実験手法** DiD / IV / Synthetic Control を Skill 化できる
-> - **DiD の parallel trends assumption**、**IV の 3 仮定（relevance / exclusion / exchangeability）**、**Synthetic Control の donor pool assumption** を Skill 契約項目として書き下せる
+> - **DiD の parallel trends assumption**、**IV の 4 仮定（relevance / exclusion / exchangeability / monotonicity）**、**Synthetic Control の donor pool assumption** を Skill 契約項目として書き下せる
 > - **linearmodels** による DiD / IV の実装と **CausalPy** による Synthetic Control の実装を、Skill としてどこまでエージェントに委ねてよいかを判断できる
 > - **「バッチ変更前後」「装置更新前後」などの ARIM 実例**を、DiD / IV に対応させて Skill 化できる
 > - **エージェントが IV 候補を提案する場合の妥当性判定**を、`variable_selection_authorization` のサブフローとして設計できる
@@ -302,8 +302,9 @@ identification_validity:
   no_spillover_assumption:                  # SUTVA 系
     status: declared
     evidence_uri: <string>
-  positivity_by_stratum: not_applicable      # SC は single-unit ITT のため層別 positivity 不適用
-  positivity_not_applicable_rationale: <string>  # 代替として donor_pool の pre-period 支持で担保
+  positivity_by_stratum:                    # Ch4 §4.4.1 canonical shape に準拠
+    status: not_applicable                  # SC は single-unit ITT のため層別 positivity 不適用
+    positivity_not_applicable_rationale: <string>  # 代替として donor_pool の pre-period 支持で担保
   dag_of_record_uri: <string>               # Ch6 で必須化
   dag_of_record_sha256: <string>            # Ch6 で必須化
   adjustment_set_approval_uri: <string>     # covariates 使用時は承認証跡
@@ -379,6 +380,7 @@ outputs:
 approver: causal_review_board
 approver_independence:
   conflict_policy: independent_reviewer_required_if_approver_is_data_producer
+  fallback_approver: facility_causal_review_board   # Ch4 §4.6.2 facility_scope_escalation 継承
 prohibited_actions:
   - approve_without_reviewer_signatures            # fatal
   - approve_iv_with_first_stage_f_below_threshold  # fatal
@@ -429,6 +431,7 @@ outputs:
 approver: causal_review_board
 approver_independence:
   conflict_policy: independent_reviewer_required_if_approver_is_data_producer
+  fallback_approver: facility_causal_review_board   # Ch4 §4.6.2 facility_scope_escalation 継承
 prohibited_actions:
   - approve_without_reviewer_signatures                    # fatal
   - approve_donor_that_experienced_similar_treatment       # fatal（SUTVA / no spillover 違反）

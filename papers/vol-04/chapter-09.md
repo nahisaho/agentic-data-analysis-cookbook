@@ -384,6 +384,20 @@ refutation_gate:
   preregistration_approver: causal_review_board
   applicability_manifest_uri: <string>           # どの test が not_applicable か immutable 宣言
   applicability_manifest_sha256: <string>
+
+  # --- estimator provenance reference（Ch8 → Ch9 hash chain、深層特徴 provenance を継承）---
+  # refutation_gate.pass を release する前に、estimation 時と refutation 実行時で
+  # estimator 契約が変わっていないことをハッシュで確認する
+  estimator_provenance_reference:
+    estimator_contract_sha256: <string>          # Ch6/7/8 の estimator 契約全体のハッシュ
+    dag_of_record_sha256: <string>               # Ch5 approval Skill が発行
+    adjustment_set_approval_uri: <string>        # 承認証跡（本ハッシュに含まれる）
+    feature_pipeline_sha256: <string>            # Ch8 covariates_deep 使用時に required
+    feature_extractor_sha256: <string>           # Ch8 §8.4.3 深層特徴 provenance（foundation model / DINO 等）
+    preprocessing_config_sha256: <string>        # Ch8 §8.4.3
+    integration_distribution_sha256: <string>    # Ch8 §8.4 g-formula 使用時に required
+    dimensionality_reduction_fit_sha256: <string> # Ch8 §8.4.3 PCA / UMAP fit hash（該当時）
+
   declared_required_tests:                       # 事前登録された必須 refutation
     - e_value
     - rosenbaum_bounds                            # PSM のみ
@@ -411,6 +425,7 @@ refutation_gate:
     partial_diagnostic_only_when: never_for_required_tests_only_for_supplementary
     partial_output: diagnostic_only              # supplementary test の一部欠落時のみ、actionable 結論なし
     fail_close_action: refuse_release_and_notify_reviewer
+    estimator_provenance_pass_requires: all_referenced_hashes_match_at_execution_time
   linkage_to_estimator_contract_change_gate:      # refutation fail 時の re-fit 経路
     on_fail: escalate_to_ecc_gate_L3_or_L4
     silent_re_run_forbidden: true
@@ -423,6 +438,8 @@ prohibited_actions:
   - swap_failing_test_for_another_test                          # fatal
   - report_partial_as_pass                                       # fatal
   - modify_preregistration_manifest_after_approval              # fatal
+  - release_refutation_pass_when_estimator_provenance_hashes_mismatch  # fatal（estimation 時と refutation 実行時で契約変化）
+  - silently_refit_deep_feature_extractor_between_estimation_and_refutation  # fatal
 ```
 
 > [!IMPORTANT]
@@ -482,7 +499,7 @@ prohibited_actions:
 
 Skill が pass を返しても、**Human review 段階**で以下をチェック：
 
-- [ ] `preregistration_manifest_sha256` と `applicability_manifest_sha256` が事前承認済み
+- [ ] `preregistration_manifest_sha256` と `applicability_manifest_sha256` が事前承認済み、`estimator_provenance_reference` の全ハッシュ（estimator_contract_sha256 / dag_of_record_sha256 / feature_pipeline_sha256 等）が estimation 時と一致
 - [ ] 全 declared_required_tests が事前登録されていたか（後から追加・削除がないか）
 - [ ] 閾値（E-value threshold、Rosenbaum critical_gamma_threshold、subset pass_threshold、coverage_tolerance 等）が事前登録されていたか
 - [ ] placebo seed / subset definition / gamma_grid が事前登録されていたか（fishing 防止）
@@ -558,8 +575,8 @@ Skill が pass を返しても、**Human review 段階**で以下をチェック
 
 - **第0章**：4 識別仮定（本章の各 refutation はそれぞれの仮定破綻に対応）
 - **第4章**：`counterfactual_scope_gate` 契約定義（本章 §9.6 で Ch8 判定を独立再検証）、3 層承認ゲート
-- **第5章**：DAG、`estimator_contract_change_gate`（本章 refutation fail 時の再承認経路）
-- **第6章**：PSM / IPW / DR / DML（本章 §9.2-9.3 の主対象、`estimand_type` + `positivity_by_stratum`）
+- **第5章**：DAG、DAG proposal / approval Skill（本章 §9.6 で scope gate 再検証時の dag_of_record_sha256 突合に使用）
+- **第6章**：PSM / IPW / DR / DML（本章 §9.2-9.3 の主対象、`estimand_type` + `positivity_by_stratum`）、`estimator_contract_change_gate`（本章 refutation fail 時の再承認経路）
 - **第7章**：DiD parallel trends assessment、IV exclusion restriction（本章 §9.4 placebo と in-space/in-time で対応）、SC placebo（`in_space_placebo` + `in_time_placebo`）
 - **第8章**：CATE / g-formula の `counterfactual_scope_gate` operational 実装（本章 §9.6 で再検証）
 - **第13章 (13a)**：Phase 1-2 で本章の refutation を必須通過ステップとして統合

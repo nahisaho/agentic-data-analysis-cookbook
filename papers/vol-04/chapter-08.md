@@ -327,6 +327,18 @@ prohibited_actions:
 > [!IMPORTANT]
 > **`intervention_execution_authorization` は "外部送信" のみでは不十分**——エージェントが「内部実験計画」「robot queue draft」「ランキング付き protocol list」「lab-ready recipe」等の**形式で actionable 化した瞬間**に発動する。CATE 予測に基づく個別介入を実験に送るのは、`counterfactual_scope_gate` pass + Human 承認の両方が必須。エージェントが「CATE 予測分散が閾値内だから自動送信」「内部プランだから承認不要」と判断することは fatal（第14章の失敗パターン）。
 
+**承認者の独立性**（Ch4 §4.6.2 の facility_scope_escalation を継承）：
+
+```yaml
+individual_recommendation_release:
+  approver: pi_and_facility_manager              # intervention_execution_authorization の default
+  approver_independence:
+    conflict_policy: independent_reviewer_required_if_approver_is_data_producer
+    fallback_approver: facility_causal_review_board
+```
+
+`approved_meta_learner_covariate_set` の登録は facility_scope_escalation により default で `facility_causal_review_board` 経由（Ch4 §4.6.2）。
+
 ### 8.6.2 scikit-uplift による材料選抜
 
 材料研究では **「介入する価値の高い試料を選ぶ」= uplift** を CATE の応用として利用：
@@ -363,6 +375,9 @@ prohibited_actions:
   - modify_candidate_universe_after_freeze                 # fatal
   - use_uplift_score_from_stale_cate_model                # fatal（provenance 尊重）
   - consume_cate_model_without_verifying_cate_contract_fields  # fatal（Ch6/Ch8 必須項目確認）
+approver_independence:                             # Ch4 §4.6.2 継承
+  conflict_policy: independent_reviewer_required_if_approver_is_data_producer
+  fallback_approver: facility_causal_review_board
 ```
 
 **scikit-uplift の使いどころ**：qini curve、uplift@k 評価、multi-treatment uplift（複数プロトコルからどれを試料に適用するか）。

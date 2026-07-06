@@ -58,11 +58,14 @@ $$
 
 ```yaml
 active_learning_acquisition_spec:
-  version: "v0.1"
-  name: "uncertainty_sampling"                # enum: uncertainty_sampling | query_by_committee | expected_model_change | bald | variance_reduction | max_entropy
-  target: "predictive_variance"               # enum: predictive_variance | class_entropy | posterior_entropy | mutual_information
+  version: "v0.2"
+  name: "predictive_variance"                 # enum (strategy family): predictive_variance | predictive_entropy | query_by_committee | expected_model_change | mutual_information_bald | integrated_variance_reduction
+  # 補足：predictive_variance は回帰の pointwise variance、predictive_entropy は分類の entropy、
+  # mutual_information_bald は total entropy - E[aleatoric entropy] で epistemic uncertainty を狙う。
+  # integrated_variance_reduction は候補点追加による領域全体の variance 積分減少を評価
   task_type: "regression"                     # enum: regression | classification | ranking
   batch_size: 4                                # AL でも batch 提案あり
+  candidate_generation_mode: "pool_based"     # enum: pool_based | continuous_synthesis | finite_feasible_set
   diversity_policy_ref: "vol-05:ch12:batch_diversity_policy_v0_2"  # 多様性は Ch12 と共有
 ```
 
@@ -86,8 +89,11 @@ committee_spec:
     - {model_id: "gp_matern52_seed1", weight: 1.0}
     - {model_id: "gp_matern32_seed2", weight: 1.0}
     - {model_id: "random_forest_seed3", weight: 1.0}
-  disagreement_metric: "variance"             # enum: variance | vote_entropy | kl_divergence | jensen_shannon
+  disagreement_metric: "committee_mean_variance"  # enum: committee_mean_variance | committee_total_variance | vote_entropy | mean_kl_divergence | jensen_shannon
+  # committee_mean_variance: 各 member の予測平均のばらつき（epistemic のみ）
+  # committee_total_variance: 各 member の predictive 分布を混合した total variance（epistemic + aleatoric）
   refresh_policy: "every_iteration"           # enum: every_iteration | fixed_after_init | on_drift
+  fit_failure_policy: "fatal"                 # enum: fatal | drop_member_and_alert | retry_with_backup_prior
 ```
 
 ### 13.2.3 Expected Model Change (EMC) / BALD
@@ -102,6 +108,9 @@ $$
 
 BNN や deep ensembles で扱いやすい。Ch8 の DKL / BNN と組合わせる。
 
+> [!NOTE]
+> `predictive_entropy` は total predictive uncertainty（epistemic + aleatoric）を測る一方、`mutual_information_bald` は expected aleatoric entropy を差し引き、**epistemic（モデルの知識不足）だけを狙う**。同種観測ノイズの GP 回帰では BALD が variance-based selection に近づくことがある。
+
 ---
 
 ## 13.3 BO vs Active Learning の判断分岐
@@ -110,19 +119,33 @@ BNN や deep ensembles で扱いやすい。Ch8 の DKL / BNN と組合わせる
 
 ```yaml
 objective_mode:
-  version: "v0.1"
-  mode: "optimization"                        # enum: optimization | learning | hybrid_learn_then_optimize | hybrid_multi_objective_and_learn
+  version: "v0.2"
+  mode: "optimization"                        # enum: optimization | learning | exploration_only | sensitivity_analysis | hybrid_learn_then_optimize | hybrid_utility_mixture
+  learning_goal: null                          # optional、mode ∈ {learning, exploration_only, sensitivity_analysis} の場合。enum: prediction_model | space_coverage | sensitivity_analysis
   declared_by: "human:project_lead_XXXX"
   declared_at: "2026-12-01T09:00:00Z"
   approval_id: "approval:HITL-20261201-OM01"
   rationale: "最高硬度の合金組成を探索するため BO を選択"
-  # hybrid の場合、切替 gate を明示
-  switch_gate:                                # optional、hybrid_* の場合のみ
+  # hybrid_learn_then_optimize の場合、切替 gate を明示（operational に定義）
+  switch_gate:                                # optional、hybrid_learn_then_optimize の場合のみ
     from: "learning"
     to: "optimization"
-    condition: "surrogate_generalization_error < 0.15 AND n_observations >= 30"
+    metric: "normalized_rmse"                  # enum: normalized_rmse | normalized_mae | r2 | negative_log_predictive_density
+    validation_method: "leave_one_out_cv"     # enum: leave_one_out_cv | k_fold | held_out_test | fixed_validation_pool
+    validation_distribution: "declared_operational_domain"  # 検証分布の宣言（Skill が勝手に in-sample を使わないため）
+    threshold: 0.15
+    confidence_rule: "upper_95_ci_below_threshold"  # enum: point_estimate_below_threshold | upper_95_ci_below_threshold | bootstrap_ci_below_threshold
+    min_observations: 30
+    hyperparameters_refit_per_fold: true       # LOO-CV の refit ポリシーを明示
     approval_required: true
-  budget_split:                               # optional、hybrid_* の場合のみ
+  # hybrid_utility_mixture の場合、AL 効用と BO 効用の混合を明示
+  hybrid_policy:                              # optional、hybrid_utility_mixture の場合のみ
+    bo_utility: "qLogEI"                       # BO acquisition（Ch7-10 canonical enum）
+    learning_utility: "integrated_variance_reduction"  # AL acquisition（§13.2 canonical enum）
+    combination_rule: "human_approved_weighted_sum"    # enum: human_approved_weighted_sum | pareto_over_utilities | epsilon_greedy
+    weights: {bo: 0.7, learning: 0.3}          # human_approved_weighted_sum の場合
+    # 注意：これは「候補選定効用の Pareto」であり、物理目的（硬度・密度等）の Pareto ではない
+  budget_split:                               # optional、hybrid_learn_then_optimize の場合のみ
     learning_budget: 30                       # 実験数
     optimization_budget: 20
     total_budget: 50
@@ -133,10 +156,15 @@ objective_mode:
 | 状況 | 推奨モード | 理由 |
 |---|---|---|
 | 「最高値を見つけたい」 | `optimization` | BO 単体、exploit + explore |
-| 「関係性を理解したい／予測モデルを作りたい」 | `learning` | AL 単体、全域探索 |
-| 「まず全体を把握してから絞りたい」 | `hybrid_learn_then_optimize` | AL 期 → BO 期、budget split |
-| 「予測モデルと最適点の両方が欲しい」 | `hybrid_multi_objective_and_learn` | Pareto 的：予測精度と最適値を同時目標に |
+| 「関係性を理解したい／予測モデルを作りたい」 | `learning` (learning_goal: prediction_model) | AL 単体、全域探索 |
+| 「空間を均等にカバーしたい／初期実験計画」 | `exploration_only` (learning_goal: space_coverage) | space-filling design、accuracy target なし |
+| 「入力変数の感度・重要度を測りたい」 | `sensitivity_analysis` | Sobol 指数、Morris 法など。予測精度目標なし |
+| 「まず全体を把握してから絞りたい」 | `hybrid_learn_then_optimize` | AL 期 → BO 期、budget split、switch_gate 経由 |
+| 「予測精度と最適化を同時最適化」 | `hybrid_utility_mixture` | 候補選定効用（AL 効用 + BO 効用）の重み付き和。**物理目的の Pareto ではない** |
 | 「装置差を理解しつつ最高値を探す」 | `hybrid_learn_then_optimize` + MTGP (Ch11) | 学習段で装置差を捉え、BO 段で MTGP surrogate として利用 |
+
+> [!WARNING]
+> `hybrid_utility_mixture` は **候補選定 utility の混合**であって、多目的 BO の Pareto ではない。物理目的（硬度・密度・コストなど）の Pareto は Ch9 の `objectives_spec` を使う。AL 効用（variance / information gain）を EHVI/NEHVI の目的ベクトル成分に入れてはいけない（fatal）。
 
 ### 13.3.2 目的モード誤認の防止契約
 
@@ -144,7 +172,7 @@ objective_mode:
 > **Skill が objective_mode を自律的に変更するのは fatal**（第3章 §3.5 逸脱と同種）。切替は必ず Human 承認付きの `objective_mode_switch_events` として記録。
 
 ```yaml
-objective_mode_switch_events:                 # append-only、hash chain（Ch12 §12.3 と同じ event schema）
+objective_mode_switch_events:                 # append-only、hash chain（Ch10 event_hash schema; Ch12 cancellation/pending events も同 schema を再利用）
   - event_id: "evt-mode-switch-20261215-001"
     event_hash: "sha256:..."
     previous_event_hash: "sha256:0000..."
@@ -154,8 +182,16 @@ objective_mode_switch_events:                 # append-only、hash chain（Ch12 
     approved_by: "human:project_lead_XXXX"
     approval_id: "approval:HITL-20261215-OM02"
     switch_gate_evaluation:
-      surrogate_generalization_error: 0.12    # threshold 0.15 未満
-      n_observations: 32                       # threshold 30 以上
+      metric: "normalized_rmse"
+      measured_value: 0.12
+      confidence_interval: [0.09, 0.145]      # upper 95% CI
+      threshold: 0.15
+      confidence_rule: "upper_95_ci_below_threshold"
+      threshold_met: true                      # upper CI (0.145) < 0.15
+      n_observations: 32
+      validation_method: "leave_one_out_cv"
+      validation_distribution: "declared_operational_domain"
+      hyperparameters_refit_per_fold: true
       gate_condition_met: true
     run_id: "run-2026-1215-01"
     skill_execution_id: "skill-exec-ABC"
@@ -167,7 +203,7 @@ objective_mode_switch_events:                 # append-only、hash chain（Ch12 
 
 ### 13.4.1 Emukit — 実験計画寄りの AL / BO 統合ライブラリ
 
-Emukit は Amazon 製の decision-making under uncertainty library。BO / AL / sensitivity analysis を統一 API で提供。
+Emukit は Amazon 製の decision-making under uncertainty library。BO / AL / sensitivity analysis を統一 API で提供。**連続空間の synthesis-style AL**（`ParameterSpace` 上で候補を生成）が既定。pool-based ではないため、`candidate_generation_mode: continuous_synthesis`。
 
 ```python
 import numpy as np
@@ -193,17 +229,26 @@ emukit_model = GPyModelWrapper(gpy_model)
 # Active Learning loop（uncertainty sampling）
 acquisition = ModelVariance(emukit_model)
 al_loop = ExperimentalDesignLoop(space, emukit_model, acquisition)
-al_loop.run_loop(user_function=expensive_measurement, stopping_condition=10)
+
+def user_function(X):
+    # Emukit は (n, d) を渡し、(n, 1) を期待する
+    return np.array([[expensive_measurement(x)] for x in X])
+
+al_loop.run_loop(user_function=user_function, stopping_condition=10)
 ```
+
+> [!NOTE]
+> Emukit / GPy は比較的低アクティビティな依存。長期運用ではバージョンを pin し、Skill インターフェースで実装をラップして交換可能にする（Ax / BoTorch への切り替えも検討）。
 
 ### 13.4.2 modAL — scikit-learn ベースの AL
 
-modAL は scikit-learn model なら何でも AL に載せられる汎用ライブラリ。分類タスクに強い。
+modAL は scikit-learn model なら何でも AL に載せられる汎用ライブラリ。分類タスクに強い。**pool-based AL**（有限 pool から候補を選ぶ）が既定。`candidate_generation_mode: pool_based`。
 
 ```python
 from modAL.models import ActiveLearner
 from modAL.uncertainty import uncertainty_sampling
 from sklearn.ensemble import RandomForestClassifier
+import numpy as np
 
 learner = ActiveLearner(
     estimator=RandomForestClassifier(n_estimators=100),
@@ -212,34 +257,49 @@ learner = ActiveLearner(
     y_training=y_init,
 )
 
-# 1 iteration: query → label → teach
+# 1 iteration: query → label → teach → pool 更新（重複回避）
 query_idx, query_x = learner.query(X_pool)
-y_new = human_label(query_x)                  # ラベル取得（Human）
+y_new = human_label(query_x)                  # ラベル取得（Human 承認 = Ch5 experiment_launch_authorization）
 learner.teach(query_x, y_new)
+X_pool = np.delete(X_pool, query_idx, axis=0)  # ★ pool から除去、次 iteration の重複回避
 ```
 
 ### 13.4.3 Skill 契約テンプレート — Active Learning Skill
 
 ```yaml
 active_learning_skill:
-  version: "v0.1"
+  version: "v0.2"
   skill_name: "active_learning_regression_v1"
   objective_mode: "learning"                  # Ch13 §13.3、この Skill は learning 専用
   surrogate:
     model_family: "single_task_gp"            # Ch5 canonical enum
     kernel_spec: {name: "matern52", nu: 2.5}  # Ch6
   acquisition:
-    name: "uncertainty_sampling"              # §13.2 canonical enum
-    target: "predictive_variance"
+    name: "predictive_variance"               # §13.2 canonical enum v0.2
   batch_size: 4
+  candidate_generation_mode: "pool_based"     # enum: pool_based | continuous_synthesis | finite_feasible_set
   diversity_policy_ref: "vol-05:ch12:batch_diversity_policy_v0_2"
   stop_condition_for_learning:                # BO の stop_condition とは別、学習用
     type: "generalization_error_threshold"    # enum: generalization_error_threshold | max_iterations | pool_exhausted | budget_exhausted
-    threshold: 0.15                            # 予測誤差 15% 未満で停止
-    validation_method: "leave_one_out_cv"     # enum: leave_one_out_cv | k_fold | held_out_test
+    metric: "normalized_rmse"                  # enum: normalized_rmse | normalized_mae | r2 | negative_log_predictive_density
+    threshold: 0.15
+    validation_method: "leave_one_out_cv"     # enum: leave_one_out_cv | k_fold | held_out_test | fixed_validation_pool
+    validation_distribution: "declared_operational_domain"
+    confidence_rule: "upper_95_ci_below_threshold"
+    hyperparameters_refit_per_fold: true
     approval_to_stop: "requires_human_approval"
   experiment_launch_authorization_ref: "vol-05:ch05:experiment_launch_authorization_v0_1"
+  # AL でも Ch5 の承認 gate は必須。詳細は §13.4.4
 ```
+
+### 13.4.4 AL と Ch5 experiment_launch_authorization の関係
+
+AL Skill が候補を提案しても、**物理実験の実行には Ch5 の `experiment_launch_authorization` が必須**（vol-05 の安全 invariant）：
+
+- `batch_size = 1` の場合：**per-experiment 承認**
+- `batch_size > 1` の場合：**per-batch 承認**。ただし `approval_scope` に `authorized_candidate_ids`、`batch_size`、`max_experiments_authorized` を明示。承認スコープが AL 提案 batch と一致する必要あり
+- 承認後の pool 変更 / diversity policy 変更 / candidate_generation_mode 変更は **承認を無効化**（新規承認が必要、fatal 相当）
+- objective_mode の `learning → optimization` 切替（§13.3.2）は、次回 experiment_launch_authorization を **新規 mode で再取得**する必要あり
 
 ---
 
@@ -249,10 +309,12 @@ active_learning_skill:
 - **勝手なモード切替**：AL 中に「良さそうな領域があった」と Skill が BO に切り替える → §13.3.2 の switch_events で防護
 - **stop_condition_for_learning の勝手な緩和**：generalization error threshold を Skill が自律的に上げる → Ch10 と同じく fatal
 - **committee の勝手な入れ替え**：QBC で committee メンバーを Skill が変更 → `committee_spec.refresh_policy` に従うことを機械検証、逸脱は fatal
-- **pool の勝手な絞込み**：candidate pool（AL でよく使う）を Skill が事前フィルタしてしまうと bias 発生 → pool の変更は `pool_modification_events` に記録、Human 承認必須
+- **候補生成の勝手な絞込み**：
+  - pool_based の場合、candidate pool を Skill が事前フィルタしてしまうと bias 発生 → `pool_modification_events` で追跡
+  - continuous_synthesis の場合、`search_space_bounds` の縮小を Skill が自律実施 → `search_space_modification_events` で追跡（下記）
 
 ```yaml
-pool_modification_events:                     # append-only、hash chain
+pool_modification_events:                     # candidate_generation_mode: pool_based の場合のみ、append-only hash chain
   - event_id: "evt-pool-mod-20261220-001"
     event_hash: "sha256:..."
     previous_event_hash: "sha256:0000..."
@@ -263,6 +325,18 @@ pool_modification_events:                     # append-only、hash chain
     rationale: "実験不可能な組成領域を除外"
     pool_size_before: 10000
     pool_size_after: 8500
+
+search_space_modification_events:             # candidate_generation_mode: continuous_synthesis / finite_feasible_set の場合、append-only hash chain
+  - event_id: "evt-space-mod-20261220-001"
+    event_hash: "sha256:..."
+    previous_event_hash: "sha256:0000..."
+    modified_at: "2026-12-20T10:00:00Z"
+    modification_type: "shrink"               # enum: shrink | expand | reparametrize | add_constraint
+    approved_by: "human:project_lead_XXXX"
+    approval_id: "approval:HITL-20261220-SM01"
+    rationale: "装置制約で温度上限を 800→700 に変更"
+    bounds_before: {x_temperature: [200, 800]}
+    bounds_after:  {x_temperature: [200, 700]}
 ```
 
 ---
@@ -270,15 +344,19 @@ pool_modification_events:                     # append-only、hash chain
 ## 13.6 Skill 契約チェックリスト
 
 - [ ] `objective_mode.mode` が Human 宣言済み、`approval_id` あり
+- [ ] `learning_goal` が learning/exploration_only/sensitivity_analysis で明示
 - [ ] `objective_mode` の変更は `objective_mode_switch_events` で追跡、Skill 自律変更禁止
-- [ ] `active_learning_acquisition_spec.name` が canonical enum
+- [ ] hybrid_learn_then_optimize の `switch_gate` は metric / validation_method / confidence_rule / min_observations がすべて明示
+- [ ] hybrid_utility_mixture の場合、AL 効用を BO の目的ベクトルに混入していないこと
+- [ ] `active_learning_acquisition_spec.name` が canonical enum v0.2
+- [ ] `candidate_generation_mode` が明示（pool_based / continuous_synthesis / finite_feasible_set）
 - [ ] `task_type` が明示（regression / classification / ranking）
-- [ ] QBC 使用時、`committee_spec.members` と `disagreement_metric` が明示
+- [ ] QBC 使用時、`committee_spec.members`、`disagreement_metric`、`fit_failure_policy` が明示
 - [ ] `batch_size >= 2` の場合、`diversity_policy_ref` で Ch12 の post-hoc 検証を利用
-- [ ] `stop_condition_for_learning` が明示、Skill 自律緩和禁止
-- [ ] `experiment_launch_authorization_ref` で Ch5 との整合
-- [ ] Pool 変更は `pool_modification_events` で Human 承認付き
-- [ ] Hybrid モードの場合、`switch_gate.condition` と `budget_split` が明示
+- [ ] `stop_condition_for_learning` に metric / confidence_rule / validation_distribution が明示、Skill 自律緩和禁止
+- [ ] `experiment_launch_authorization_ref` で Ch5 承認 gate を機械参照、per-experiment / per-batch のスコープ一致検証
+- [ ] Pool 変更は `pool_modification_events`、search_space 変更は `search_space_modification_events` で Human 承認付き
+- [ ] Hybrid モードの場合、`budget_split` または `hybrid_policy.weights` が明示
 - [ ] BO Skill (Ch7-12) と切り分けて別 Skill として登録（同一 Skill で兼務しない）
 
 ---

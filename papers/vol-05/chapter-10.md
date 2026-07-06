@@ -72,8 +72,8 @@ constraints_declared:
       threshold: 800.0
       unit: "degC"
       rationale: "装置耐熱上限（メーカー仕様）"
-      enforcement: "pre_authorization_filter"   # 提案候補は Skill が返す前にフィルタ
-      violation_action: "fatal"                 # enum: fatal | warn | record_only
+      enforcement: "pre_authorization_filter"   # hard の場合は必ずこの値
+      violation_action: "fatal"                 # hard の場合は必ず fatal
     - name: "pressure_upper_bound"
       variable: "x_pressure"
       operator: "<="
@@ -92,8 +92,15 @@ constraints_declared:
       enforcement: "cEI_feasibility_model"
       feasibility_probability_threshold: 0.5   # P(feasible | x) >= 0.5 の候補のみ許可
       surrogate_ref: "gp_yield"                # feasibility 用 surrogate
-      violation_action: "record_only"          # 事後に判明、run 継続
+      on_threshold_miss: "candidate_rejected"  # enum: candidate_rejected | needs_human_review | fatal
+      violation_action: "record_only"          # 事後の実測違反時（soft のみ warn / record_only 可）
 ```
+
+> [!IMPORTANT]
+> **スキーマルール**：
+> - `constraint_type: hard` → `enforcement` は必ず `pre_authorization_filter`、`violation_action` は必ず `fatal`
+> - `constraint_type: soft` → `violation_action` は `record_only` または `warn` を許容（`fatal` も可）
+> - `on_threshold_miss` は soft で feasibility 確率が閾値未満だった時の Skill 挙動
 
 ### 10.2.3 pre-authorization filter の実装
 
@@ -106,38 +113,88 @@ Skill 実行フロー：
      - 違反があれば Skill fatal（violation_event を append）
      - 違反がなければ次へ
      ↓
-3. HRD（第7/8章）: 外挿検知
+3. HRD（第7/8章）:
+     3a. objective surrogate の HRD
+     3b. 各 soft constraint surrogate の HRD
+     3c. いずれかで flag が立てば `candidate_rejected` または
+         `needs_human_review`（Skill 自律で launch 不可）
      ↓
-4. experiment_launch_authorization: Human に提示
+4. Soft constraint feasibility 確認:
+     - 各 soft_constraint について P(g_k(x_cand) ≤ 0 | x_cand) を計算
+     - すべての k で `feasibility_probability_threshold` 以上か確認
+     - 未満なら `candidate_rejected`（同 hash・同 threshold での再最適化のみ許可、
+       閾値変更は fatal / 新 run）
      ↓
-5. Human 承認 → 実験実行
+5. experiment_launch_authorization: Human に提示
+     - constraint_precheck ブロックを添付（下記）
+     ↓
+6. Human 承認 → 実験実行
+```
+
+**constraint_precheck ブロック（Layer 3 が Layer 2 の実行証跡を機械検証）**：
+
+```yaml
+experiment_launch_authorization:
+  # ... (Ch5 §5.2 の他フィールド)
+  constraint_precheck:
+    constraints_declared_hash: "sha256:..."       # 契約の同一性証跡
+    candidate_hash: "sha256:..."
+    hard_constraints_checked: true                # Layer 2 実行済み
+    checker_version: "constraint-filter-v0.1"
+    checked_at: "2026-11-21T10:23:45Z"
+    result: "pass"                                # enum: pass | fail
+    soft_constraint_probabilities:
+      yield_lower_bound: 0.83                     # P(feasible | x_cand)
+    hrd_status:
+      objective: "clear"                          # enum: clear | flagged
+      soft_constraints:
+        yield_lower_bound: "clear"
 ```
 
 > [!IMPORTANT]
-> **Layer 1（bounds）だけでは不十分**。BoTorch 最適化は bounds を守るが、Skill の後段処理（例：エージェントが候補を書き換えるループ）で違反が生じうる。**Layer 2 の pre-authorization filter は必ず独立に実装**すること（defense in depth）。
+> **Layer 3 の独立監査**：`constraint_precheck.hard_constraints_checked=false` または欠落なら、Layer 3（`experiment_launch_authorization`）は自動で `status: denied` に設定し Skill fatal。Layer 2 の実行を暗黙的に信頼しない。
+
+> [!IMPORTANT]
+> **Layer 1（bounds）だけでは不十分**。BoTorch 最適化は bounds を守るが、Skill の後段処理（例：エージェントが候補を書き換えるループ）で違反が生じうる。**Layer 2 の pre-authorization filter は必ず独立に実装**し、**Layer 3 は `constraint_precheck` で Layer 2 実行を機械検証**すること（defense in depth）。
+
+> [!WARNING]
+> **filter fail 後の再最適化ルール**：Layer 2 で違反が検出された場合、Skill は「同一 `constraints_declared_hash`・同一 threshold・同一 hard filter」の設定でのみ再最適化を試行できる。**閾値を緩めて再最適化するのは fatal または新 run**（第3章 §3.5 逸脱 5 と同種）。
 
 ### 10.2.4 constraint violation event の記録
 
 ```yaml
 constraint_violation_events:
   - event_id: "evt-cv-20261121-001"
+    event_hash: "sha256:cur..."
+    previous_event_hash: "sha256:def456..."
+    run_id: "run-2026-1121-A01"
+    skill_execution_id: "skill-exec-XX-YY"
     iteration: 7
     detected_at: "2026-11-21T10:23:45Z"
+    detected_by: "skill"                          # enum: skill | human | audit_job
     detection_stage: "pre_authorization_filter"   # enum: pre_authorization_filter | post_experiment | audit
+    constraints_declared_hash: "sha256:contract..."
     constraint_name: "temperature_upper_bound"
     constraint_type: "hard"                       # enum: hard | soft
+    operator: "<="
+    threshold: 800.0
+    unit: "degC"
+    candidate_id: "cand-2026-1121-A01-i7"
+    candidate_hash: "sha256:cand..."
     candidate_x:
       x_temperature: 825.0
       x_pressure: 3.2
-    threshold: 800.0
     actual: 825.0
+    predicted_probability: null                   # soft の時のみ P(feasible | x)
+    observed_value: null                          # post_experiment の時のみ
+    measurement_uncertainty: null                 # post_experiment の時のみ
+    authorization_id: null                        # 承認前ブロックなら null、承認後違反なら参照
     violation_action: "fatal"
     skill_response: "run_aborted"
     root_cause_hypothesis: "acquisition optimizer が bounds を無視、要調査"
-    previous_event_hash: "sha256:def456..."
 ```
 
-append-only、Skill が事後に隠蔽・修正するのは fatal。
+append-only、Skill が事後に隠蔽・修正するのは fatal。`event_hash` チェーンで改ざん検知。
 
 ---
 
@@ -157,35 +214,43 @@ $$
 P(\text{feasible} \mid x) = \prod_{k} P(g_k(x) \leq 0 \mid x)
 $$
 
-### 10.3.2 BoTorch 実装 — qLogNEI + constraint
+### 10.3.2 BoTorch 実装 — qLogNEI + constraints
 
-BoTorch では `qLogNoisyExpectedImprovement` に `constraints` を渡す：
+BoTorch では `qLogNoisyExpectedImprovement` に `constraints` を渡す（**callable のリスト**）：
 
 ```python
 import torch
 from botorch.acquisition.logei import qLogNoisyExpectedImprovement
+from botorch.acquisition.objective import GenericMCObjective
 from botorch.models import ModelListGP
 
-# obj_model: 目的関数の GP
-# con_model: 制約 g(x) <= 0 の GP（複数可）
+# obj_model:   目的関数の GP（例：hardness）— 出力 index 0
+# con_model_k: 制約 g_k(x) <= 0 の GP（feasible = 負側）— 出力 index 1, 2, ...
 model = ModelListGP(obj_model, con_model_1, con_model_2)
 
-# BoTorch 慣習: constraint は g(x) <= 0 の形（feasible が負側）
-def constraint_callable(Z):
-    # Z: (..., M+K) — model outputs (M objectives + K constraints)
-    # 各 constraint output を返す
-    return [Z[..., 1], Z[..., 2]]
+# 目的関数だけを取り出す objective（制約を平均に混ぜないため必須）
+objective = GenericMCObjective(lambda Z, X=None: Z[..., 0])
+
+# 各制約は callable のリスト。BoTorch 慣習では g_k(x) <= 0 で feasible
+constraints = [
+    lambda Z: Z[..., 1],    # g_1(x) = 60 - yield(x)
+    lambda Z: Z[..., 2],    # g_2(x) = ...（追加制約があれば）
+]
 
 acq = qLogNoisyExpectedImprovement(
     model=model,
     X_baseline=X_obs,
-    constraints=constraint_callable,
+    objective=objective,
+    constraints=constraints,
     prune_baseline=True,
 )
 ```
 
 > [!NOTE]
-> **符号規約**：BoTorch の constraint は $g(x) \leq 0$ で **feasible が負側**。`yield_lower_bound: yield >= 60` は $g(x) = 60 - \text{yield}(x) \leq 0$ に変換する。`constraints_declared.operator` から自動変換する adapter を Skill 内に持つと良い。
+> **符号規約**：BoTorch の constraint は $g(x) \leq 0$ で **feasible が負側**。`yield_lower_bound: yield >= 60` は $g(x) = 60 - \text{yield}(x) \leq 0$ に変換する。**変換の責任所在**：以下のいずれかを Skill 契約に明示：
+> (a) **constraint model は変換済み** $g(x)$ を学習する（推奨、model output = $g$）、
+> (b) **constraint callable 内で変換**：`lambda Z: threshold - Z[..., idx]` のように output を $g$ に変換。
+> raw yield を `Z[..., 1]` にそのまま渡すと BoTorch は $\text{yield} \leq 0$ を feasible と誤解釈するので危険。
 
 ### 10.3.3 cEHVI — 制約付き多目的
 
@@ -195,12 +260,30 @@ acq = qLogNoisyExpectedImprovement(
 from botorch.acquisition.multi_objective.logei import (
     qLogNoisyExpectedHypervolumeImprovement,
 )
+from botorch.acquisition.multi_objective.objective import (
+    IdentityMCMultiOutputObjective,
+)
+
+# model: ModelListGP(obj_1, obj_2, con_1, con_2, ...)
+#   output 0, 1: 目的関数（M=2）
+#   output 2, 3, ...: 制約（K 個）
+model = ModelListGP(obj_hardness_gp, obj_density_gp, con_yield_gp)
+
+# 目的の出力だけを取り出す（制約を hypervolume 計算に混ぜないため必須）
+objective = IdentityMCMultiOutputObjective(outcomes=[0, 1])
+
+# 制約は M 番目以降の output index を参照
+M = 2  # 目的数
+constraints = [
+    lambda Z: Z[..., M + 0],   # g_1(x) = 60 - yield(x)
+]
 
 acq = qLogNoisyExpectedHypervolumeImprovement(
-    model=model,           # ModelListGP with M objectives + K constraints
-    ref_point=ref_point,
+    model=model,
+    ref_point=ref_point,       # 目的の次元 (M,) のみ
     X_baseline=X_obs,
-    constraints=constraint_callable,
+    objective=objective,
+    constraints=constraints,
     prune_baseline=True,
 )
 ```
@@ -219,40 +302,91 @@ acq = qLogNoisyExpectedHypervolumeImprovement(
 - **Lipschitz 定数** $L$：制約関数の変化率上限（既知 or bounded posterior）
 - **信頼区間パラメータ** $\beta_t$：探索の慎重さ
 
-**Skill 契約**：
+**Skill 契約 (`safe_bo_config` v0.2)**：
 
 ```yaml
 safe_bo_config:
-  version: "v0.1"
+  version: "v0.2"
   enabled: true
+  safety_constraints_ref:               # どの hard_constraint に対する SafeOpt か
+    - "temperature_upper_bound"
+    - "pressure_upper_bound"
   feasible_seed_set:
-    - {x_temperature: 300.0, x_pressure: 1.0, verified_at: "2026-11-01T09:00:00Z"}
-    - {x_temperature: 450.0, x_pressure: 2.0, verified_at: "2026-11-05T14:30:00Z"}
+    - x: {x_temperature: 300.0, x_pressure: 1.0}
+      constraint_values: {temperature_upper_bound: 300.0, pressure_upper_bound: 1.0}
+      verified_at: "2026-11-01T09:00:00Z"
+      verified_by: "human:staff_id_XXXX"
+      evidence_ref: "experiment_id:EXP-2026-1101-A03"
+    - x: {x_temperature: 450.0, x_pressure: 2.0}
+      constraint_values: {temperature_upper_bound: 450.0, pressure_upper_bound: 2.0}
+      verified_at: "2026-11-05T14:30:00Z"
+      verified_by: "human:staff_id_XXXX"
+      evidence_ref: "experiment_id:EXP-2026-1105-B01"
+  seed_verification:
+    minimum_seeds_required: 2
+    on_empty_safe_set: "blocked_until_safe_seed_verified"   # enum: blocked_until_safe_seed_verified | fatal
   lipschitz_bound:
-    source: "human_declared"          # enum: human_declared | posterior_derived
-    value: 0.15                       # 制約関数の per-unit 変化率上限
+    source: "human_declared"            # enum: human_declared | posterior_derived
+    per_constraint:
+      temperature_upper_bound: 0.15
+      pressure_upper_bound: 0.08
+    norm: "L_infinity"                  # enum: L_1 | L_2 | L_infinity
+    per_dimension: false                # true なら次元ごとに別値
+    unit: "output_units_per_input_unit"
     rationale: "予備実験と物理モデルから推定、Human 承認済み"
+    approval_id: "approval:HITL-20261101-L01"
   beta_t_schedule:
-    type: "constant"                  # enum: constant | log_growth
-    value: 3.0                        # ~99.7% CI
-  expansion_policy: "conservative"    # enum: conservative | balanced
+    type: "constant"                    # enum: constant | log_growth
+    value: 3.0                          # ~99.7% CI（正規性仮定）
+    delta: 0.003                        # target failure probability
+    confidence_interpretation: "high_probability_bound_on_gp_posterior"
+  domain:
+    type: "continuous"                  # enum: continuous | discrete_candidate_set
+    candidate_set_ref: null
+  expansion_policy: "conservative"      # enum: conservative | balanced
+  recompute_safe_set_every_n_iterations: 1
 ```
 
-### 10.4.2 SafeOpt vs cEI の選択
+**運用ルール**：
+
+- **seed が空になったら** `blocked_until_safe_seed_verified`（Skill 停止、Human が新 seed を verify）
+- Lipschitz は `per_constraint` で個別宣言（統一値は近似）
+- `beta_t_schedule` の `delta`（失敗確率）と `value` の対応は Human 承認事項
+- 実測から Lipschitz が過小と判明したら Skill fatal（run 継続不可）
+
+### 10.4.2 選択木 — 制約分類とアプローチ
+
+**まず制約の性質で分岐**（Skill 契約の安全性は分類の正しさで決まる）：
 
 ```
-[Q1] 制約を事前評価できる（実験不要）か？
-  ├─ YES → search_space_bounds に組み込み（BO 内部で自動的に守られる）
+[Q0] 違反が装置損傷 / 人身事故 / 法令違反 を招くか？（絶対制約か？）
+  ├─ YES → hard constraint 扱い。
+  │       - Layer 1 (bounds) + Layer 2 (pre_authorization_filter)
+  │         + Layer 3 (constraint_precheck) の 3 層を必須に設定
+  │       - この上に、feasible seed / Lipschitz / β_t が全て揃うなら
+  │         SafeOpt を追加採用（追加安全層）
+  │       - 揃わない場合は `blocked_until_safe_seed_verified` で
+  │         Skill 停止（Human が予備実験で seed を確保するまで実行不可）
+  │       - 「cEI で確率的に守る」は禁止（安全制約に確率許容は不可）
+  │
+  └─ NO  → Q1
+
+[Q1] 違反が実験失敗 / 採算悪化に留まるか？
+  ├─ YES → soft constraint 扱い。
+  │       - cEI (単目的) / cEHVI (多目的) + feasibility surrogate
+  │       - feasibility_probability_threshold を Skill 契約で固定
+  │       - constraint surrogate にも HRD (Ch7/8) を適用
+  │
   └─ NO  → Q2
 
-[Q2] 制約違反が装置損傷 / 安全性リスクを伴うか？
-  ├─ YES → Safe BO（SafeOpt / StageOpt）+ hard_constraints filter
-  └─ NO  → Q3
-
-[Q3] feasible seed point が事前に確保できるか？
-  ├─ YES → Safe BO も選択肢
-  └─ NO  → cEI/cEHVI（feasibility を surrogate で学習）
+[Q2] 制約が deterministic に事前評価可能か？
+  ├─ YES → search_space_bounds に反映（BO 内部で自動遵守）
+  │        hard 扱いの場合は Layer 2 filter にも追加（二重防護）
+  └─ NO  → Q0 に戻る（性質を再評価）
 ```
+
+> [!WARNING]
+> **「事前評価可能なら bounds だけで十分」は誤り**。物理・法令由来の絶対制約は、bounds が守られていても Skill 後段処理での書き換え・丸め誤差で違反が生じうる。**必ず Layer 2 filter + Layer 3 precheck も併設**。
 
 > [!WARNING]
 > **SafeOpt を「安全」と誤解しない**：SafeOpt が保証するのは Lipschitz と β_t の仮定が正しい場合のみ。Lipschitz を過小評価すれば違反が起きる。**物理・法令由来の絶対制約は必ず Layer 2 の hard_constraints filter で二重防護**する。

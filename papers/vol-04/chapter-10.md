@@ -113,27 +113,34 @@ experimental_design_provenance:
     randomization_seed: 42                          # 上記と同一 seed または別 seed（記録要）
     assignment_log_uri: "artifact://designs/<name>_assignment.jsonl"
 
-identification_validity:
-  strategy: randomized_experiment
-  exchangeability:
-    status: checked
-    evidence: randomization_seed_and_assignment_log
-    evidence_uri: <string>
-  positivity_by_stratum:                            # Ch4 §4.4.1 canonical shape
-    status: checked
-    strata:
-      - key: full_factorial_cell
-        min_treated: 1                              # 各 cell に最低 1 unit
-        min_control: not_applicable                 # 各 cell が independent treatment
-        violation_policy: fail_close
-        stratum_report_uri: <string>
-  consistency:
-    status: checked
-    intervention_protocol_uri: <string>
-    execution_log_uri: <string>
-  sutva_declared:
-    status: assessed                                 # randomize しても spillover は消えない
-    evidence_uri: <string>
+# --- L2: 識別仮定（Ch4 §4.9 canonical、top-level 配置）---
+positivity_by_stratum:                              # Ch4 §4.4.1 canonical shape (list-of-objects)
+  status: checked
+  strata:
+    - key: full_factorial_cell
+      min_treated: 1                                # 各 cell に最低 1 unit
+      min_control: not_applicable                   # DoE 特有：各 cell が independent treatment のため
+                                                     # min_control の not_applicable を Ch4 §4.4.1 の
+                                                     # 拡張として第10章で許容（rationale 必須）
+      violation_policy: fail_close
+      stratum_report_uri: <string>
+  aggregate_report_uri: <string>
+sutva_declared:
+  status: assessed                                   # randomize しても spillover は消えない
+  evidence_uri: <string>
+consistency_declared:
+  status: checked
+  evidence_uri: <string>                             # intervention_protocol_uri + execution_log_uri
+exchangeability_declared:
+  status: checked
+  evidence_uri: <string>                             # randomization_seed_and_assignment_log
+
+# success-criteria sub-block (Ch4 §4.3 style)
+success_criteria:
+  identification_validity: required
+identification_validity:                            # Ch4 style: checker + report_uri のみ
+  checker: randomized_design_review
+  report_uri: <string>
 
 prohibited_actions:
   - modify_factors_or_levels_after_design_freeze     # fatal
@@ -204,7 +211,21 @@ experimental_design_provenance:
   generator_string: "D=ABC; E=BCD; F=ACD; G=ABD"    # 定義生成子
   defining_relation_uri: <string>                    # I = ABCD = ...（完全リスト）
   alias_structure_report_uri: <string>               # 各効果と alias の対応表
+  alias_structure_sha256: <string>                   # design_freeze 時に凍結、以後 immutable
   alias_structure_frozen_at: <timestamp>
+  alias_verification:                                # 機械検証契約（N-6）
+    procedure: |
+      1. generator_string を parse → defining relation I = ABCD, ... を計算
+      2. design_matrix から alias 類を経験的に列挙
+      3. declared resolution == min(len(word) for word in defining_relation) を検証
+      4. interactions_assumed_negligible ⊇ {k-way : k >= resolution} を検証
+    library: pyDOE2_alias_structure_from_generator    # or OApackage
+    verification_report_uri: <string>
+    verification_report_sha256: <string>
+  resolution_to_negligibility_map:                   # required 整合性契約
+    III: ["2-way", "3-way", "higher"]                # Res III は 2-way も negligible 前提
+    IV:  ["3-way", "higher"]                          # ただし 2-way vs 2-way の相互 alias 明示要
+    V:   ["4-way", "higher"]
   interactions_assumed_negligible:                   # 「無視する」仮定を明示
     - 3-way
     - 4-way
@@ -224,6 +245,9 @@ prohibited_actions:
   - post_hoc_resolve_alias_by_running_extra_cells_without_estimator_contract_change_gate  # fatal
   - report_2way_estimate_from_resolution_iii_design                              # fatal
   - use_defining_relation_that_breaks_declared_resolution                        # fatal
+  - declare_resolution_inconsistent_with_generator_string                        # fatal（N-6）
+  - omit_alias_structure_sha256                                                  # fatal（N-6）
+  - modify_alias_structure_after_design_freeze                                   # fatal
 ```
 
 ### 10.3.3 alias structure の可視化と Skill 出力
@@ -293,6 +317,9 @@ randomization_seed_provenance:
     - hardware_rng_at_design_time                    # HRNG（TPM 等）
     - user_specified_deterministic                   # 論文再現・教育用のみ
     - blockchain_derived_at_design_time              # 事後改変不能性が求められる高規制環境
+                                                     # （医薬 GLP・GMP 等の tamper-evident 台帳が要求される場面のみ。
+                                                     #  通常研究では os_urandom_at_design_time で十分。
+                                                     #  概念的には notary_timestamped_at_design_time と等価）
   seed_generation_timestamp: <ISO8601>
   seed_generator_library: python_secrets             # or numpy_default_rng | os_urandom
   seed_generator_library_version: <string>
@@ -305,29 +332,64 @@ prohibited_actions:
 
 ### 10.5.2 assignment log の必須項目
 
+assignment log は **file header（1 行目に `__header__` レコード）+ 各 run レコード** の JSONL 構造：
+
 ```jsonl
-{"run_id": "R001", "unit_id": "sample_042", "assigned_cell": {"temperature": 500, "pressure": 5.0}, "assignment_timestamp": "2026-07-06T14:22:11Z", "randomization_seed": 42, "operator": "op_007", "block_id": "day_1_morning"}
-{"run_id": "R002", ...}
+{"__header__": {"design_matrix_uri": "artifact://designs/<name>.parquet", "design_matrix_sha256": "<hex>", "randomization_seed": 42, "randomization_algorithm": "fisher_yates", "algorithm_library": "numpy_default_rng==1.26.0", "log_frozen_at": "2026-07-06T14:20:00Z"}}
+{"run_id": "R001", "design_matrix_row_index": 7, "unit_id": "sample_042", "assigned_cell": {"temperature": 500, "pressure": 5.0}, "assignment_timestamp": "2026-07-06T14:22:11Z", "randomization_seed": 42, "operator": "op_007", "block_id": "day_1_morning"}
+{"run_id": "R002", "design_matrix_row_index": 3, ...}
 ```
 
+- **`__header__.design_matrix_sha256`**：assignment log を design matrix に **hash bind**（B-5）——header が欠落・不整合ならログ全体が invalid
+- **`design_matrix_row_index`**：randomization 前の元設計行番号——permutation 検証に使用
 - **run_id**：実行順序（randomization 後の実際の順序）
 - **unit_id**：試料 ID（ARIM 資材台帳と連携）
 - **assigned_cell**：処置の完全記述
 - **block_id**：blocking factor の値
 - **operator**：オペレータ ID（後述 blocking で使用）
 
-### 10.5.3 seed 上書きの検知（Ch4 Table 4.4 item 10 の operational 定義）
+### 10.5.3 seed 上書き検知と immutability chain 全体（Ch4 Table 4.4 item 10 の operational 定義）
 
-Ch4 §4.8 Table 4.4 item 10（`randomization_seed_override: fatal`）は本節で操作的に定義：
+Ch4 §4.8 Table 4.4 item 10（`randomization_seed_override: fatal`）を含む immutability chain を本節で操作的に定義。**seed 一致だけでは行入替・cell 再割当・行削除は検出できない**（B-5）ため、4 段の verification を必須化：
 
 ```yaml
 detection:
-  compare:
-    - source: experimental_design_provenance.generation.random_seed
-    - source: assignment_log_uri[*].randomization_seed
-  policy: all_records_must_match_provenance_declared_seed
+  seed_match:                                        # 従来の seed 一致検証
+    compare:
+      - source: experimental_design_provenance.generation.random_seed
+      - source: assignment_log_uri.__header__.randomization_seed
+      - source: assignment_log_uri[*].randomization_seed
+    policy: all_records_and_header_must_match_provenance_declared_seed
+  design_hash_match:                                 # design matrix ↔ header
+    compare:
+      - source: experimental_design_provenance.design_matrix_sha256
+      - source: assignment_log_uri.__header__.design_matrix_sha256
+    policy: exact_match
+  permutation_reproducibility:                       # 行入替の検知
+    procedure: |
+      apply seeded fisher_yates(design_matrix_rows, seed) →
+      expect the resulting order == assignment_log[*].design_matrix_row_index (as sequence)
+    library: numpy_default_rng | pyDOE2
+    policy: byte_exact
+  execution_records_binding:                         # 実行記録との bind
+    each_execution_record_must_cite:
+      - design_matrix_sha256
+      - assignment_log_sha256
+      - run_id
+    policy: every_execution_record_must_bind_all_three
   mismatch_action: fatal_stop_and_notify_facility_causal_review_board
 ```
+
+**追加禁止事項**（§10.2.2 / §10.8 の `prohibited_actions` に追加）：
+
+```yaml
+- assignment_log_row_reorder_after_execution         # fatal（B-5）
+- execution_record_missing_design_matrix_sha256      # fatal（B-5）
+- assignment_log_missing_header_record               # fatal（B-5）
+- silent_deletion_of_failed_runs_without_design_matrix_recompute  # fatal（B-5）
+```
+
+これにより §10.1.1 の「exchangeability が checked になる根拠は seed + assignment log の監査可能性」が **operational に真** となる。
 
 ---
 
@@ -363,7 +425,9 @@ experimental_design_provenance:
     randomization_seed: 42
     randomization_algorithm: fisher_yates_within_block
 
-  blocking_factors:                                 # 明示宣言（fatal に発火する検知フィールド）
+  blocking_factors_declared:                        # 明示宣言（fatal に発火する検知フィールド）
+                                                     # Ch4 §4.9 の `blocking_factors` を top-level で `_declared`
+                                                     # 接尾辞に統一（N-2、confounders_declared 等と平仄）
     - name: instrument_id
       type: nuisance                                # nuisance | strategic
       values: [XRD-A, XRD-B, XRD-C]
@@ -386,16 +450,29 @@ experimental_design_provenance:
     whole_plot_randomization_seed: 42
     subplot_randomization_seed: 43                  # 別 seed 推奨
 
-  # analysis stage への契約
-  mixed_model_specification_uri: <string>           # 分析時の random effect 指定
-                                                      # RCBD: block を random effect、
-                                                      # split-plot: whole plot も random effect
+  # analysis stage への契約（N-5：verifiability 拡張）
+  mixed_model_specification_uri: <string>           # 分析時の random effect 指定ファイル
+  mixed_model_specification_sha256: <string>        # design 段 ↔ analysis 段での swap 検知
+  mixed_model_specification_schema:                 # 仕様形式の pin
+    statsmodels_mixedlm | lme4_formula | pymc_model_config
+  mixed_model_random_effects_declared:              # analysis 契約：宣言 random effect
+    - instrument_id
+    - operator_id
+    - day
+  mixed_model_fixed_effects_declared:               # analysis 契約：宣言 fixed effect
+    - temperature
+    - pretreatment_time
+  # operational check（分析 Skill 側で必須）：
+  #   set(mixed_model_random_effects_declared) ⊇ set(blocking_factors_declared[*].name)
+  #   違反 → fatal（`ignore_blocking_factor_in_analysis`）
   degrees_of_freedom_report_uri: <string>           # 各 error stratum の df を事前算出
 
 prohibited_actions:
   - ignore_blocking_factor_in_analysis              # fatal（block を無視すると SE 過小）
   - treat_split_plot_as_crd_in_analysis             # fatal（whole plot error を過小評価）
   - assign_blocking_factor_post_hoc                 # fatal（実行後に "実は装置差あった" は禁止）
+  - swap_mixed_model_specification_between_design_and_analysis  # fatal（N-5）
+  - random_effects_missing_declared_blocking_factor              # fatal（N-5）
   - unbalance_blocks_without_documented_reason      # warning → fatal if effect estimation
   - use_block_as_fixed_effect_when_generalization_intended  # warning
 ```
@@ -422,14 +499,16 @@ prohibited_actions:
 
 ### 10.7.1 効率指標
 
-DoE の効率は **information gain per run** で測ります：
+DoE の効率は **information gain per run** で測ります。$X$ を $N \times p$ 設計行列（$p$ はパラメータ数、$N$ は run 数）、$v(x) = x'(X'X)^{-1}x$ を予測分散として：
 
 | 指標 | 定義 | 意味 |
 |---|---|---|
-| **D-efficiency** | $\|X^T X\| / n^p$ の関数、値域 [0, 1] | パラメータ共分散の行列式の逆——**小さい共分散 = 高効率** |
-| **A-efficiency** | trace($(X^T X)^{-1}$) の逆数 | 平均予測分散の逆 |
-| **G-efficiency** | $\max_x \text{Var}(\hat{y}(x))$ の逆数 | worst-case 予測分散 |
-| **V-efficiency** | 予測分散の空間平均の逆数 | 全域平均予測分散 |
+| **D-efficiency** | $D\text{-eff} = \left(\dfrac{\|X'X\|}{N^p}\right)^{1/p}$ | パラメータ共分散行列式の（正規化）逆——**小さい共分散 = 高効率** |
+| **A-efficiency** | $A\text{-eff} = \dfrac{p}{N \cdot \operatorname{tr}\bigl((X'X)^{-1}\bigr)}$ | 平均予測分散の（正規化）逆 |
+| **G-efficiency** | $G\text{-eff} = \dfrac{p}{N \cdot \max_x v(x)}$ | worst-case 予測分散の（正規化）逆 |
+| **V-efficiency** | $V\text{-eff} = \dfrac{p}{N \cdot \overline{v(x)}}$ | 全域平均予測分散の（正規化）逆 |
+
+> **注**：pyDOE2 / OApackage 等の実装が返す値域 $[0, 1]$ の "efficiency" は、上記絶対値を **candidate design と D-optimal design（同 run budget 上）との比** で正規化したもの。閾値 `0.80` はこの **relative efficiency**（D-optimal 基準 or full factorial 基準）に対する下限値であり、`comparison_baseline` で対象を明示することが必須。
 
 **契約項目**：
 
@@ -458,6 +537,8 @@ success_criteria:
 | **blocking factor の追加・削除** | — | ✅（`variable_selection_authorization`） |
 | **efficiency threshold の緩和** | — | ✅（`estimator_contract_change_gate` L3） |
 | 実行順の randomization | ✅（seed provenance 遵守下） | — |
+| **design_matrix_sha256 の凍結（design_freeze）** | ✅（記録） | ✅（facility timestamp + human witness） |
+| **preregistration_manifest の凍結** | ✅（生成） | ✅（`research_lead` 署名、以後 post-hoc 修正は fatal） |
 | **実際の実験装置起動** | — | ✅（`intervention_execution_authorization`） |
 | **failure（危険物取扱・budget over・機材競合）検知時の停止** | ✅（fail-close） | — |
 
@@ -558,6 +639,33 @@ skill:
     - instrument_id
     - operator_id
 
+  # === ②' データ来歴（Ch4 §4.9 audit block、B-4）===
+  data_lineage:
+    dataset_uri: <string>
+    dataset_sha256: <string>
+    arim_facility_id: <string>
+    experiment_ids: [<id>, ...]
+
+  # === ②'' 識別仮定（L2, Ch4 §4.4.1 canonical shape, top-level, B-4）===
+  positivity_by_stratum:
+    status: checked
+    strata:
+      - key: full_factorial_cell
+        min_treated: 1
+        min_control: not_applicable                    # DoE 特有（§10.2.2 参照）
+        violation_policy: fail_close
+        stratum_report_uri: <string>
+    aggregate_report_uri: <string>
+  sutva_declared:
+    status: assessed
+    evidence_uri: <string>
+  consistency_declared:
+    status: checked
+    evidence_uri: <string>
+  exchangeability_declared:
+    status: checked
+    evidence_uri: <string>
+
   # === ③ 出力形式 ===
   outputs:
     estimate: main_effects_and_interactions_with_ci
@@ -578,7 +686,7 @@ skill:
     checker: randomized_design_review
     report_uri: <string>
 
-  # --- refutation gate (Ch9 §9.7.1) ---
+  # --- refutation gate (Ch9 §9.7.1、B-2 preregistration 必須) ---
   declared_required_tests:
     - e_value                                          # unmeasured confounder への頑健性（DoE では低リスクだが required）
     - random_common_cause
@@ -586,11 +694,16 @@ skill:
     - scope_gate_reverification                       # 実験域外への外挿判定
   applicability_manifest_uri: <string>
   applicability_manifest_sha256: <string>
+  preregistration_manifest_uri: <string>              # Ch9 §9.7.1: design_matrix / factor_universe /
+                                                       # seed / blocking / declared_required_tests を
+                                                       # design_freeze 時点で凍結（B-2）
+  preregistration_manifest_sha256: <string>           # Ch4 §4.8 item 15 fatal 対象
 
   sensitivity_analysis:
     method: e_value
-    effect_direction: harmful | protective
-    ci_bound_closest_to_null: <bound>
+    effect_direction: harmful | protective            # → harmful は lower_bound、protective は upper_bound
+    effect_scale: transformed_continuous_with_smd_to_rr_conversion  # S-2: DoE outcome は連続量が多い
+    ci_bound_closest_to_null: lower_bound             # S-2: effect_direction に応じて明示
     smd_to_rr_conversion: vanderweele_2020
     threshold:
       minimum_e_value: 1.5
@@ -611,8 +724,20 @@ skill:
       method: leave_one_out_empirical
       calibration_evidence_uri: <string>
       calibration_approved_at: <timestamp>
-    aggregate_policy:
-      pass_requires: all_four_pass
+    aggregate_policy:                                 # N-7: 3-state 完全形
+      pass_requires: all_four_pass                    # pass 条件
+      conditional_pass_output: non_actionable_diagnostic_only
+                                                       # 4-check 中 3 pass + support_envelope pass の場合、
+                                                       # actionable な推定はできず、
+                                                       # 診断的な報告のみ許可される
+      fail_action: fail_close_and_notify_causal_review_board
+    fallback: human_review                            # N-7
+    fallback_approver: research_lead
+    fallback_message_template: |                      # N-7
+      Counterfactual scope gate did not pass for experimental design {design_id}.
+      Failing checks: {failing_checks}
+      Estimated support envelope: {support_envelope_summary}
+      Design proposes prediction outside experimental support: manual review by {approver} required.
 
   # === ⑤ 禁止事項 ===
   prohibited_actions:
@@ -624,6 +749,15 @@ skill:
     - assign_blocking_factor_post_hoc
     - ignore_missing_cells_in_analysis
     - use_execution_order_correlated_with_outcome
+    - preregistration_manifest_post_hoc_modification  # fatal (Ch4 §4.8 item 15 / Ch9 §9.7.1、B-2)
+    - assignment_log_row_reorder_after_execution      # fatal (B-5)
+    - execution_record_missing_design_matrix_sha256   # fatal (B-5)
+    - assignment_log_missing_header_record            # fatal (B-5)
+    - silent_deletion_of_failed_runs_without_design_matrix_recompute  # fatal (B-5)
+    - declare_resolution_inconsistent_with_generator_string           # fatal (N-6)
+    - omit_alias_structure_sha256                                     # fatal (N-6)
+    - swap_mixed_model_specification_between_design_and_analysis      # fatal (N-5)
+    - random_effects_missing_declared_blocking_factor                 # fatal (N-5)
 
   # === ⑥ 再現性条件（L3: 実行レイヤ） ===
   library_stack:
@@ -642,8 +776,8 @@ skill:
     variable_selection_authorization:
       required_for:
         - factor_universe_change
-        - blocking_factors_declared_change
-        - design_parameter_change                     # resolution / fraction / block size
+        - design_parameter_change                     # resolution / fraction / block size /
+                                                       # blocking_factors_declared（S-3: umbrella term）
       approver: research_lead
     intervention_execution_authorization:
       required_for:
@@ -674,13 +808,31 @@ skill:
     n_runs_total: 24
     replication_policy: {...}
     randomization_scope: {...}
-    blocking_factors: [...]                           # §10.6.3 参照
+    blocking_factors_declared: [...]                  # §10.6.3 参照（N-2: `_declared` に統一）
     randomization_seed_provenance: {...}              # §10.5.1 参照
     design_matrix_uri: <string>
     design_matrix_sha256: <string>
     assignment_log_uri: <string>
+    assignment_log_sha256: <string>                   # B-5: header + records の hash
     information_gain_metric: d_efficiency
     information_gain_threshold: 0.80
+    information_gain_baseline:                        # N-4: threshold の baseline を明示
+      baseline_design_type: full_factorial            # or d_optimal_with_same_run_budget
+      baseline_efficiency: 1.00
+      efficiency_ratio_achieved: 0.85
+      n_runs_ratio: 0.25                              # 例：1/4 の run で 0.85 の相対効率
+    # fractional の場合の追加項目
+    alias_structure_sha256: <string>                  # N-6
+    alias_verification:                               # N-6
+      library: pyDOE2_alias_structure_from_generator
+      verification_report_uri: <string>
+      verification_report_sha256: <string>
+    # RCBD / split-plot の分析契約
+    mixed_model_specification_uri: <string>           # N-5
+    mixed_model_specification_sha256: <string>        # N-5
+    mixed_model_specification_schema: statsmodels_mixedlm  # N-5
+    mixed_model_random_effects_declared: [instrument_id, operator_id, day]  # N-5
+    mixed_model_fixed_effects_declared: [temperature, pretreatment_time]     # N-5
     generation:
       library: pyDOE2
       library_version: <string>
@@ -722,8 +874,16 @@ run_order = rng.permutation(design_actual.shape[0])
 design_randomized = design_actual[run_order]
 
 # hash for immutability
-design_bytes = json.dumps(design_randomized.tolist(), sort_keys=True).encode()
-design_sha256 = hashlib.sha256(design_bytes).hexdigest()
+# 決定論的 hash（S-5）：float 表現の環境依存を避けるため、
+# tobytes() で正規化された float64 byte 列 + 明示スキーマヘッダを使う
+design_f64 = design_randomized.astype(np.float64)
+schema_header = json.dumps({
+    "factors": ["temperature", "pressure", "pretreatment_time"],
+    "dtype": "float64",
+    "shape": list(design_f64.shape),
+    "byte_order": "little",
+}, sort_keys=True).encode("utf-8")
+design_sha256 = hashlib.sha256(schema_header + b"|" + design_f64.tobytes()).hexdigest()
 
 # assignment log
 assignment_log = [
@@ -775,14 +935,19 @@ design = lhs(n=3, samples=20, criterion='maximin')   # 3 factors, 20 points, max
 
 - [ ] **§10.1 randomization による識別仮定の格上げ**——exchangeability / positivity / consistency が checked に、SUTVA は assessed のまま——を説明できる
 - [ ] **§10.2 full factorial の runs 数と交互作用推定可能性**——$N = \prod L_j$、$2^k$ で $2^k$ 効果全て clean——を計算できる
+- [ ] **§10.2.2 L2 識別仮定を top-level `_declared` 接尾辞で書ける**（Ch4 §4.9 canonical shape 準拠、B-3）
 - [ ] **§10.3 fractional factorial の resolution**——III / IV / V の意味と alias structure を書き下せる
+- [ ] **§10.3.3 alias structure の機械検証**——`alias_structure_sha256` + `alias_verification` + `resolution_to_negligibility_map` を作成できる（N-6）
 - [ ] **§10.3.4 Plackett-Burman**——主効果 only、2-way 以上禁止——の適用場面を説明できる
 - [ ] **§10.5 randomization seed の 3 点セット**（seed value / 生成 method / assignment log）と `randomization_seed_provenance` を作成できる
+- [ ] **§10.5.2 assignment log の `__header__` レコード**（design_matrix_sha256 bind）を書ける（B-5）
+- [ ] **§10.5.3 immutability chain 4 段**（seed_match / design_hash_match / permutation_reproducibility / execution_records_binding）を説明できる（B-5）
 - [ ] **§10.6 blocking と CRD/RCBD/split-plot/Latin square** の使い分けを、`blocking_factors_declared` + `randomization_scope` で書ける
-- [ ] **§10.7 D/A/G/V-efficiency** の定義と、`information_gain_metric` + threshold の設定ができる
+- [ ] **§10.6.3 mixed_model_specification** の 5 項目（uri / sha256 / schema / random_effects_declared / fixed_effects_declared）を宣言できる（N-5）
+- [ ] **§10.7 D/A/G/V-efficiency** の正規化された定義と、`information_gain_metric` + threshold + `comparison_baseline` の設定ができる（N-4 / N-8）
 - [ ] **§10.7.3 design proposal/approval の 2 Skill 分離**——エージェント自律 vs Human 承認の境界を説明できる
-- [ ] **§10.8 DoE Skill 契約テンプレート**を、自研究テーマで完全に埋められる
-- [ ] **§10.9 pyDOE2 API**（fullfact / fracfact / pbdesign / lhs）と design_matrix_sha256 の凍結手順を実装できる
+- [ ] **§10.8 DoE Skill 契約テンプレート**を、自研究テーマで完全に埋められる——L2 top-level 仮定 + preregistration_manifest + counterfactual_scope_gate fallback 含む（B-2 / B-4 / N-7）
+- [ ] **§10.9 pyDOE2 API**（fullfact / fracfact / pbdesign / lhs）と決定論的 `design_matrix_sha256` の凍結手順（`tobytes()` + schema header）を実装できる（S-5）
 
 ---
 

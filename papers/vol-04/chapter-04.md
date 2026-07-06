@@ -341,6 +341,7 @@ authorization_gates:
         - approved_meta_learner_covariate_set          # Ch8
         - approved_facility_design_template            # Ch10 §10.7.3 DoE template promotion
         - approved_facility_response_surface_baseline  # Ch11 §11.5/§11.8 GP kernel + hyperparameter template promotion
+        - approved_facility_prior_specification        # Ch12 §12.8 Bayesian DoE 事前分布テンプレート promotion（特定材料クラス向け）
       default_approver: facility_causal_review_board
       rationale: |
         施設全体に影響する artifact promotion は、個別 PI の research_lead 権限を超える。

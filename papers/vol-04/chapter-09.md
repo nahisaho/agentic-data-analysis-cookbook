@@ -407,6 +407,8 @@ refutation_gate:
     - data_subset_validation
     - scope_gate_reverification                   # Ch8 CATE / g-formula のみ
     - ite_prediction_coverage_refutation          # ite_labeled_prediction 主張時のみ
+    - prior_predictive_check                      # Ch12 §12.2.3 — Bayesian DoE のみ (applicability_manifest 要)
+    - prior_data_alignment                        # Ch12 §12.7.2 — Bayesian DoE のみ (applicability_manifest 要)
   test_results:
     e_value: {status: pass | fail | insufficient_data | not_applicable, evidence_uri: ...}
     rosenbaum_bounds: {status: ..., evidence_uri: ...}
@@ -416,6 +418,8 @@ refutation_gate:
     data_subset_validation: {status: ..., evidence_uri: ...}
     scope_gate_reverification: {status: ..., evidence_uri: ...}
     ite_prediction_coverage_refutation: {status: ..., evidence_uri: ...}
+    prior_predictive_check: {status: ..., evidence_uri: ...}       # Ch12 §12.2.3
+    prior_data_alignment: {status: ..., evidence_uri: ...}         # Ch12 §12.7.2
   aggregate_status: pass | fail | partial_diagnostic_only
   aggregate_policy:
     pass_requires: all_declared_required_tests_status_pass

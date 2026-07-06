@@ -17,13 +17,20 @@
 
 ### 9.1.2 本章の Skill 骨格
 
-**refutation_gate**：以下の 5 テストのうち **契約で必須と宣言したもの全てが pass しない限り、estimator の結論は release できない**：
+**refutation_gate**：以下の 10 テスト（本章の 5 基本テスト + Ch8 covariates_deep 用 2 テスト + Ch8/Ch12 拡張 3 テスト、canonical enum `ch09_v0_3` — §9.7.1 参照）のうち **契約で必須と宣言したもの全てが pass しない限り、estimator の結論は release できない**：
 
 1. **E-value**（unmeasured confounder への強度スケール、§9.2）
 2. **Rosenbaum bounds**（マッチング推定の感度分析、§9.3）
 3. **Placebo test**（false effect の非検出、§9.4）
 4. **Random common cause**（偽 confounder を加えても効果が保たれるか、§9.4）
 5. **Data subset validation**（部分集合で効果が再現されるか、§9.5）
+6. **Unobserved common cause strength**（unmeasured confounder の強度パラメータ scan、§9.7 拡張）
+7. **Scope gate reverification**（Ch8 CATE / g-formula のみ、§9.7）
+8. **ITE prediction coverage refutation**（`ite_labeled_prediction` 主張時のみ、§9.7）
+9. **Prior predictive check**（Bayesian DoE のみ、Ch12 §12.2.3 で back-register）
+10. **Prior data alignment**（Bayesian DoE のみ、Ch12 §12.7.2 で back-register）
+
+以下では 5 基本テスト（1-5）を §9.2-§9.5 で先に扱い、canonical enum 完全形は §9.7.1 で定義する。
 
 追加で **counterfactual_scope_gate re-verification**（Ch8 から継承、§9.6）を Ch9 側で独立に再検証。
 
@@ -378,6 +385,14 @@ Ch8 で `pass` が Ch9 で `fail` に：
 
 ```yaml
 refutation_gate:
+  enum_version: ch09_v0_3                        # canonical enum version（B-10）
+  # 変更履歴:
+  #   ch09_v0_1: 初版 8 tests (e_value, rosenbaum_bounds, placebo, random_common_cause,
+  #                            unobserved_common_cause_strength, data_subset_validation,
+  #                            scope_gate_reverification, ite_prediction_coverage_refutation)
+  #   ch09_v0_2: (欠番、Ch12 統合準備)
+  #   ch09_v0_3: Ch12 §12.2.3 / §12.7.2 で prior_predictive_check + prior_data_alignment を追加（Bayesian DoE のみ、+2 tests → 計 10 tests）
+  # 版数の silent downgrade は Ch14 §14.3.3 の fatal downgrade_declared_required_tests_enum_version_silently に該当。
   preregistration_manifest_uri: <string>         # 事前登録された全設定の manifest
   preregistration_manifest_sha256: <string>
   preregistration_approved_at: <timestamp>

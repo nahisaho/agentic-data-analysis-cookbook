@@ -223,14 +223,14 @@ skill:
     estimation: econml==0.15.0
     refutation: dowhy==0.11.1
   identification_strategy: backdoor
-  causal_graph_uri: "artifact://dags/ate_v1.dot"
-  causal_graph_sha256: "abc123..."
+  dag_of_record_uri: "artifact://dags/ate_v1.dot"    # canonical 名（旧名 causal_graph_uri は Ch4 §4.4 で dag_of_record_uri に統一）
+  dag_of_record_sha256: "abc123..."
   confounders_declared: [device_id, operator, batch_id]
   estimand_type: total_effect
-  refutation_tests_required:
-    - placebo_treatment_refuter
-    - random_common_cause
-    - data_subset_refuter
+  declared_required_tests:                           # canonical enum 名（旧名 refutation_tests_required は DoWhy Python API 名、Ch9 §9.7.1 で概念名ベースに統一）
+    - placebo                                        # canonical enum
+    - random_common_cause                            # canonical enum
+    - data_subset_validation                         # canonical enum
   authorization_gates:
     dag_authorization:
       required_for: [causal_graph_uri_change, identification_strategy_change]
@@ -252,7 +252,7 @@ skill:
 - **library_stack**：識別・推定・検算にそれぞれどのライブラリを使うか（**Skill の因果責務は 1 つに固定した上で、必要なライブラリは明記して混在可**）
 - **identification_strategy**：backdoor / frontdoor / IV / DiD / RDD / Synthetic Control のいずれか（変更は `dag_authorization`）
 - **estimand_type**：total_effect / direct_effect / indirect_effect（第2章 §2.5 パターン 3）
-- **refutation_tests_required**：DoWhy の refutation ツール正式 API 名（`placebo_treatment_refuter`, `random_common_cause`, `data_subset_refuter` 等）。Skill は refutation pass しない限り結果を返さない（第9章）
+- **declared_required_tests**：canonical enum 名（`placebo` / `random_common_cause` / `data_subset_validation` / `e_value` / `rosenbaum_bounds` / `scope_gate_reverification` 等、Ch9 §9.7.1 canonical）。Skill は refutation pass しない限り結果を返さない（第9章）。旧名 `refutation_tests_required`（DoWhy Python API 名）から統一。
 - **authorization_gates**：3 層承認 + `counterfactual_scope_gate`。`required_for` は machine-executable な enum 名（アンダースコア区切り）で列挙する
 
 **第4章で完全展開する項目**：`experimental_design_provenance`（DoE 章の Skill 契約）、`randomization_seed`、`blocking_factors`。**`sequential_experiment_stop_condition` は vol-04 では扱わず、vol-05 の逐次実験計画の契約項目として導入します**（本書では Ch4 でも展開しません）。
@@ -267,7 +267,7 @@ skill:
 - [ ] **pgmpy と causal-learn の使い分け**を説明できる（既知 DAG での推論 vs DAG 探索）
 - [ ] **Table 3.3（権限マップ）** から、自分が最初に作る Skill が **`dag_authorization` / `variable_selection_authorization` / `counterfactual_scope_gate` のどれに触れるか**を挙げられる
 - [ ] **§3.6 のフローチャート**を辿って、**自分の研究テーマに対する初手 library stack / route を 1 つ**選んだ
-- [ ] **§3.7 の契約テンプレート**を自分のテーマに埋めた（identification_strategy / estimand_type / confounders_declared / refutation_tests_required の 4 項目）
+- [ ] **§3.7 の契約テンプレート**を自分のテーマに埋めた（identification_strategy / estimand_type / confounders_declared / declared_required_tests の 4 項目）
 - [ ] causal-learn の探索型 DAG 出力を **無承認で採用しない**方針を理解した（第2章 §2.5 パターン 2 と接続）
 - [ ] **SMT の外挿 = `counterfactual_scope_gate`** で制御することを理解した（Ch4 で定義、Ch8-9 で判定、Ch11 で適用）
 

@@ -442,6 +442,9 @@ distinguishes_from_chapter_11_by:
 
 `prior_data_alignment_check` は Bayesian DoE 特有：
 
+> [!NOTE]
+> **命名規約（N-3）**：`prior_data_alignment` は Ch9 §9.7.1 の `declared_required_tests` canonical enum 名。ここで扱う `prior_data_alignment_check` はその **operational check function 名**（YAML block と関数名に接尾辞 `_check` を付ける）。両者は 1:1 対応する。
+
 ```yaml
 prior_data_alignment_check:
   method: prior_predictive_p_value                   # 事前予測と実データの整合性 p-value

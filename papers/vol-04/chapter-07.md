@@ -365,7 +365,10 @@ prohibited_actions:
 ```yaml
 skill_type: iv_approval_skill
 authorization_level: human_required
-authorization_gate: variable_selection_authorization
+authorization_gates:                                                     # canonical plural (Ch4 §4.9, N-13)
+  variable_selection_authorization:
+    approver: causal_review_board
+    required_for: [approved_instruments_registration]
 inputs:
   - iv_candidate_report_uri
   - proposal_bundle_sha256
@@ -414,7 +417,10 @@ prohibited_actions:
 ```yaml
 skill_type: donor_pool_approval_skill
 authorization_level: human_required
-authorization_gate: variable_selection_authorization
+authorization_gates:                                                     # canonical plural (Ch4 §4.9, N-13)
+  variable_selection_authorization:
+    approver: causal_review_board
+    required_for: [approved_donor_pool_registration]
 inputs:
   - proposal_bundle_sha256
   - similarity_treatment_evidence_uri

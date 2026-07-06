@@ -372,6 +372,9 @@ scm:
 
 第4章 §4.6 で導入した**3 層承認ゲート**の第1層 `dag_authorization` は、**DAG の変更・確定は Human 承認**でした。これを **Skill レベルで 2 種類に分離**します。
 
+> [!TIP]
+> **Ch14 との対応（S-6）**：本節の `dag_proposal_skill` + `dag_approval_skill` 分離は、Ch14 §14.1.1（DAG misspecification）/ §14.3.1（silent DAG modification）の 2 大失敗モードを防ぐ contract 実装。読者は本章の Skill 契約を実装した後、Ch14 の failure catalogue を用いて自研究室の実装が防ぎ得るモードを確認できる。
+
 ### 5.6.1 Skill 型 1：`dag_proposal_skill`（エージェント自律）
 
 **目的**：観測データからの DAG **候補**を提案する
@@ -417,7 +420,10 @@ prohibited_actions:
 ```yaml
 skill_type: dag_approval_skill
 authorization_level: human_required
-authorization_gate: dag_authorization
+authorization_gates:                            # canonical plural (Ch4 §4.9, N-13)
+  dag_authorization:
+    approver: research_lead
+    required_for: [dag_of_record_uri_change, dag_of_record_sha256_mismatch, identification_strategy_change]
 inputs:
   - dag_candidate_uri
   - dag_candidate_sha256

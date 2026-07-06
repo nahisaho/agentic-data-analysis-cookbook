@@ -45,20 +45,27 @@
 observational_dataset:
   n_rows: 500
   columns:
-    # 処置候補（意思決定変数）
-    - substrate_temperature_c            # 40-120 °C
-    - solvent_ratio_dcb                  # 0-1（DCB:CB 混合比）
-    - annealing_time_min                 # 0-30 min
-    # 応答
-    - v_oc_v                             # 0.5-1.5 V（目的変数）
-    - efficiency_percent                 # PCE
-    # 潜在的 confounder / covariate
-    - instrument_id                      # {A, B, C}（3 装置）
-    - operator_id                        # {O1..O5}（5 オペレータ）
-    - film_thickness_nm                  # 50-250 nm（mediator 候補）
-    - humidity_percent                   # 30-70%（confounder 候補）
-    - date_of_run                        # 時系列（unmeasured confounder 検出用）
+    # 処置候補（意思決定変数）— factors[].role: primary_intervention
+    - substrate_temperature_c            # 40-120 °C  # role: primary_intervention
+    - solvent_ratio_dcb                  # 0-1（DCB:CB 混合比）  # role: primary_intervention
+    - annealing_time_min                 # 0-30 min  # role: primary_intervention
+    # 応答 — role: outcome
+    - v_oc_v                             # 0.5-1.5 V（目的変数）  # role: primary_outcome
+    - efficiency_percent                 # PCE  # role: secondary_outcome
+    # 潜在的 confounder / covariate — role: backdoor_adjustment
+    - instrument_id                      # {A, B, C}（3 装置）  # role: backdoor_adjustment (blocking factor)
+    - operator_id                        # {O1..O5}（5 オペレータ）  # role: backdoor_adjustment (blocking factor)
+    - film_thickness_nm                  # 50-250 nm（mediator 候補）  # role: mediator_candidate
+    - humidity_percent                   # 30-70%（confounder 候補）  # role: backdoor_adjustment
+    - date_of_run                        # 時系列（unmeasured confounder 検出用）  # role: temporal_probe
   identification_strategy: observational_backdoor  # Phase 1 は backdoor で開始
+  # === factors[].role の enum（Ch5 §5.2 / Ch10 §10.2.2 canonical）===
+  # primary_intervention: 意思決定変数（DoE の factor 候補）
+  # primary_outcome / secondary_outcome: 目的変数
+  # backdoor_adjustment: DAG の親の親（confounder）
+  # mediator_candidate: 処置と outcome の中間変数（Ch5 §5.2.2）
+  # blocking_factor: DoE の blocking（Ch10 §10.4）
+  # temporal_probe: unmeasured confounder 検出用
 ```
 
 ---
@@ -138,7 +145,7 @@ candidate_dags:
       film_thickness → v_oc
     backdoor_adjustment_set: [humidity, instrument, operator]
     complexity: 5_edges
-    note: film_thickness を含めると collider bias（M-bias）発生。§5.2 参照
+    note: film_thickness は solvent_ratio と substrate_temperature の collider。film_thickness を adjustment に含めると collider bias 発生（Ch5 §5.2.3）。M-bias（Ch5 §5.2.4）は $Z$ が **未観測** の $U_1, U_2$ の collider である別パターンで、本 dag_v3 とは異なる。
 ```
 
 Human 承認者は 3 候補の中から `dag_v2_with_mediator` を選択（現実的にありうる構造 + mediator を明示）。以降、`approved_dag_uri = dag_v2_with_mediator` として固定。
@@ -187,34 +194,41 @@ cate_estimation_provenance:
     A: 0.121                                  # 高 CATE
     B: 0.083
     C: 0.024                                  # 低 CATE、positivity 境界
-  counterfactual_scope_gate:                  # Ch4 §4.5.2 / Ch9 §9.6
-    checks:
-      - name: covariate_hull_mahalanobis
-        threshold: 3.0
-        observed: 2.4
-        pass: true
-      - name: propensity_positivity
-        threshold: 0.05
-        observed: 0.02                        # ⚠️ instrument=C で fail
-        pass: false
-      - name: covariate_hull_knn
-        threshold: 0.10
-        observed: 0.08
-        pass: true
-      - name: prediction_interval_uncertainty
-        threshold: 0.15
-        observed: 0.11
-        pass: true
+  counterfactual_scope_gate:                  # Ch4 §4.5.2 / Ch9 §9.6 canonical mapping form
+    mahalanobis_check:
+      distance_cluster_conditional: 2.4       # instrument 別 cluster
+      cluster_assignment_uri: <string>
+      threshold: 3.0
+      cluster_conditional: true
+    variance_check:
+      predicted_cate_variance: 0.11
+      threshold: 0.15
+    knn_density_check:
+      k: 20
+      knn_min: 5
+      n_training_points_within_radius: 3      # ⚠️ instrument=C 領域で <5 → fail
+      knn_radius: 0.10
+    support_envelope_check:
+      outside_support_dimensions: [instrument_C_propensity_range]  # C は propensity 0.02-0.35 で境界外
+      envelope_report_uri: <string>
+    threshold_calibration:                    # Ch4 §4.5.2 canonical
+      method: leave_one_out_empirical
+      calibration_evidence_uri: <string>
+      calibration_approved_at: <timestamp>
     aggregate_policy:
-      pass_requires: all_four_pass            # Ch11 §11.7.2
-    gate_status: fail                         # ← positivity fail
+      pass_requires: all_four_pass
+      conditional_pass_output: non_actionable_diagnostic_only
+      fail_action: fail_close_and_exclude_stratum_from_phase_2  # instrument=C 除外は本 gate の action
+    gate_status: fail                         # ← knn_density / support_envelope が fail
     fallback: human_review
     fallback_approver: research_lead
     fallback_message_template: |              # Ch4 §4.5.2 canonical
       CATE Skill が instrument=C で action を提案しましたが、
-      propensity_positivity check が失敗しました（observed 0.02 < threshold 0.05）。
-      instrument=C は観測データが少なく、対応する CATE 推定は
-      extrapolation risk が高い状態です。
+      knn_density_check と support_envelope_check が失敗しました。
+      instrument=C は観測データが少なく（k-NN half-radius 内 3 点 < 閾値 5）、
+      propensity range も [0.02, 0.35] と境界的（positivity_by_stratum: conditional）で、
+      対応する CATE 推定は extrapolation risk が高い状態です。
+      failing_checks: {failing_checks}
       選択肢:
         (a) instrument=C を Phase 2 DoE の対象から除外
         (b) instrument=C の観測データを追加収集
@@ -311,6 +325,17 @@ skill_2b_variable_selection_approval:
       approved_design_uri: <string>
       approved_design_sha256: <string>
       approved_estimator_tier: T3_gp_mle       # ← 昇格の場合 Ch6 §6.7.1 L4 event
+      # 昇格時（前承認 tier と異なる）は tier_upgrade_provenance を必須にする（Ch6 §6.7.1 / Ch11 §11.4.2）
+      tier_upgrade_provenance:                 # approved_estimator_tier が前承認から変わる場合のみ
+        from_tier: T2_gbm                       # 例: 前 approval からの遷移
+        to_tier: T3_gp_mle
+        estimator_contract_change_gate:         # Ch6 §6.7.1 L4 approval-type gate
+          approval_type: approval
+          approver: research_lead
+          approved_at: <timestamp>
+          estimator_diff_report_uri: <string>   # Ch6 §6.7.3
+          estimator_diff_report_sha256: <string>
+        new_skill_version_issued: 2.0.0         # Ch11 §11.4.2 `approve_tier_upgrade_without_new_skill_version` fatal 回避
       approver: <string>
       approved_at: <timestamp>
       approval_conditions:
@@ -355,15 +380,15 @@ approved_design_provenance:                   # Ch10 §10.8 canonical + Ch12 §1
   # === Bayesian 部分（Ch12 §12.8）===
   prior_specification_provenance:
     prior_type: hierarchical
-    prior_family:
-      beta: normal
-      mu_0: normal
-      sigma_0: half_cauchy
-    prior_hyperparameters:                    # Ch12 N-2 canonical
-      mu_0_mu: 0.85                            # 過去 500 件の平均 V_OC
-      mu_0_sigma: 0.12
-      tau_scale: 0.05                          # 装置間変動の scale
-      sigma_0_scale: 0.03
+    prior_family:                              # Ch12 §12.2.2 canonical: theta/mu/tau naming
+      theta: normal                             # 効果パラメータ（beta 相当）
+      mu: normal                                # 群平均（mu_0 相当）
+      tau: half_cauchy                          # 群間分散（sigma_0 相当）
+    prior_hyperparameters:                    # Ch12 N-2 canonical: leaf は scalar hyperparameters
+      mu_0_mu: 0.85                            # 過去 500 件の平均 V_OC（μ の平均）
+      mu_0_sigma: 0.12                          # μ の標準偏差
+      tau_scale: 0.05                          # τ (HalfCauchy) の scale — 装置間変動
+      sigma_0_scale: 0.03                       # σ_0 (HalfCauchy) の scale — 観測ノイズ
     prior_source: previous_experiment          # 過去 500 件
     prior_source_uri: <string>                 # 観測データ manifest
     prior_source_sha256: <string>
@@ -387,10 +412,11 @@ approved_design_provenance:                   # Ch10 §10.8 canonical + Ch12 §1
   randomization_seed_pinned_at: <timestamp>
   assignment_log_uri: <string>
   assignment_log_sha256: <string>
-  assignment_log_header_recorded: true         # Ch10 §10.5.3 4-stage detection
-  design_hash_match: true
-  permutation_reproducibility: true
-  execution_records_binding: not_yet_bound     # 実行後に bind
+  seed_match: true                             # Ch10 §10.5.3 stage 1（provenance.seed ↔ assignment_log header ↔ per-row seed）
+  design_hash_match: true                      # stage 2
+  permutation_reproducibility: true            # stage 3
+  execution_records_binding: not_yet_bound     # stage 4（実行後に bind）
+  assignment_log_header_recorded: true          # 追加 check（Ch10 §10.5.3 fatal `assignment_log_missing_header_record` 検出）
 
   # === Mixed model（Ch10 N-5）===
   mixed_model_specification_uri: <string>
@@ -440,32 +466,50 @@ response_surface_provenance:                   # Ch11 §11.5.3
     predicted_v_oc: 0.982
     prediction_ci_95: [0.958, 1.006]
 
-  counterfactual_scope_gate:                    # Ch11 §11.7.2 4-check + threshold_calibration
-    checks:
-      - name: posterior_predictive_mahalanobis
-        pass: true
-        observed: 1.8
-        threshold: 3.0
-      - name: posterior_predictive_variance
-        pass: true
-        observed: 0.024
-        threshold: 0.05
-      - name: prior_support_knn                 # Ch12 §12.7 では Bayesian 版
-        pass: true
-        observed: 0.14
-        threshold: 0.10
-      - name: posterior_credible_region
-        pass: true
-        observed: 0.048
-        threshold: 0.05
+  counterfactual_scope_gate:                    # Ch11 §11.7.2 canonical mapping form
+    mahalanobis_check:
+      method: posterior_predictive_mahalanobis
+      distance_cluster_conditional: 1.8         # instrument 別 cluster
+      cluster_assignment_uri: <string>
+      threshold: 3.0
+      cluster_conditional: true
+    variance_check:
+      method: gp_predictive_variance
+      predicted_variance: 0.024
+      threshold: 0.05                            # 訓練時 max variance の 2 倍
+    knn_density_check:
+      k: 5                                       # 訓練 N=24 のため小さめ（Ch11 §11.7.2 準拠）
+      knn_min: 2
+      n_training_points_within_radius: 4
+      knn_radius: 0.10
+    support_envelope_check:
+      method: convex_hull_or_ellipsoid
+      outside_support_dimensions: []             # x* は凸包内
+      envelope_report_uri: <string>
+      strict: true
     threshold_calibration:                       # Ch4 §4.5.2 canonical
-      method: response_surface_predictive_conformal
+      method: leave_one_out_empirical            # or conformal（N=24 で有効）
       calibration_evidence_uri: <string>
       calibration_approved_at: <timestamp>
     aggregate_policy:
       pass_requires: all_four_pass
+      conditional_pass_output: non_actionable_diagnostic_only
+      fail_action: fail_close_and_reject_optimum_recommendation
     gate_status: pass
-    fallback: not_triggered
+    fallback: human_review                        # gate_status=pass だが定義自体は要
+    fallback_approver: research_lead
+    fallback_message_template: |                  # Ch4 §4.5.2 canonical (fail 時発火)
+      Response surface Skill が x*={x_star_natural} を提案（design {design_id}）。
+      予測 V_OC = {predicted_v_oc} [{prediction_ci_95}]
+      設計凸包: {design_hull_summary}
+      failing_checks: {failing_checks}
+      GP predictive variance at x*: {predicted_variance}
+      approved_design_sha256: {approved_design_sha256}
+      選択肢:
+        (a) 推奨点を却下
+        (b) x* での confirmation runs を追加発注し設計領域を拡張
+        (c) research_lead に escalation
+      ⚠️ 設計凸包外の外挿を actionable として報告することは fatal（§13.5 参照）。
 ```
 
 ### 13.3.4 Phase 2 完了時の evidence chain
@@ -565,42 +609,66 @@ Phase 3 の gate は Phase 1（観測 CATE）・Phase 2（応答曲面）と **o
 | Phase 3 | SCM 反実仮想の識別可能性 | intervention support, mediator path stability | 本節 |
 
 ```yaml
-counterfactual_scope_gate_scm:                 # Phase 3 版（5-check）
-  checks:
-    - name: intervention_support_in_observed_data
-      description: do(x*) が観測データの support 内にあるか
-      observed: 0.87
-      threshold: 0.80
-      pass: true
-    - name: mediator_path_stability_check
-      description: mediator (film_thickness) の x → mediator パスが DoE 実行前後で不変か
+counterfactual_scope_gate_scm:                  # Phase 3 版（SCM 特有 5-check、canonical mapping form）
+  # === Phase 1/2 と共通の 4 軸（Ch4 §4.5.2 canonical、SCM-operational 版）===
+  mahalanobis_check:
+    method: intervention_support_mahalanobis    # do(x*) が観測 support の中心にあるか
+    distance_cluster_conditional: 1.9           # instrument 別 cluster
+    cluster_assignment_uri: <string>
+    threshold: 3.0
+    cluster_conditional: true
+  variance_check:
+    method: scm_counterfactual_variance         # SCM tier-3 の反実仮想分散
+    counterfactual_variance: 0.028
+    threshold: 0.05
+  knn_density_check:
+    method: intervention_support_knn_in_observed
+    k: 15                                        # 観測 N=500 に応じたスケール
+    knn_min: 5
+    n_training_points_within_radius: 42
+    knn_radius: 0.10
+  support_envelope_check:
+    method: intervention_support_envelope
+    outside_support_dimensions: []
+    envelope_report_uri: <string>
+    intervention_support_fraction: 0.87          # do(x*) の observed support 内比率
+    fraction_threshold: 0.80
+  # === Phase 3 特有の第 5 軸（SCM ならではの識別可能性 check）===
+  scm_identifiability_check:                    # Phase 3 のみの追加 axis
+    mediator_path_stability:                    # x → mediator パス係数の DoE 前後変化
       observed_slope_delta: 0.04
       threshold: 0.10
       pass: true
-    - name: unmeasured_confounder_e_value        # Ch9 §9.2
-      description: E-value が閾値以上（結論反転耐性）
-      e_value_observed: 2.1
-      threshold: 1.5
+    scm_posterior_predictive_check:              # SCM 構造方程式のデータ再現度
+      predictive_score: 0.94
+      threshold: 0.80
       pass: true
-    - name: sensitivity_analysis                 # Ch10 N-4 / Ch11 B-5 canonical
+    dag_of_record_consistency:                   # 承認 DAG と施設 dag_of_record の衝突
+      pass: true
+      evidence_uri: <string>
+    # === 感度分析（Ch10 N-4 / Ch11 B-5 canonical、check ではなく provenance として並置）===
+    sensitivity_analysis:
       method: e_value
       effect_direction: positive
       effect_scale: transformed_continuous_with_smd_to_rr_conversion
-      ci_bound_closest_to_null: 0.951             # 95% CI 下限
+      ci_bound_closest_to_null: 0.951
       smd_to_rr_conversion: chinn_2000
       threshold:
         minimum_e_value: 1.5
+      e_value_observed: 2.1
       pass: true
-    - name: dag_of_record_consistency
-      description: 承認 DAG が施設 dag_of_record と衝突していないか
-      pass: true
-      evidence_uri: <string>
   threshold_calibration:                          # Ch4 §4.5.2 canonical
     method: scm_counterfactual_bootstrap_calibration
     calibration_evidence_uri: <string>
     calibration_approved_at: <timestamp>
   aggregate_policy:
-    pass_requires: all_five_pass                  # Phase 3 は 5-check
+    pass_requires: all_five_pass                  # 4 共通軸 + 1 SCM 特有軸（scm_identifiability_check）
+    conditional_pass_requires:
+      - mahalanobis_check_pass
+      - variance_check_pass
+      - knn_density_check_pass
+      - support_envelope_check_pass
+      - scm_identifiability_check_pass
     conditional_pass_output: non_actionable_diagnostic_only
     fail_action: fail_close_and_reject_intervention_proposal
   gate_status: pass | conditional_pass | fail
@@ -622,6 +690,22 @@ counterfactual_scope_gate_scm:                 # Phase 3 版（5-check）
       (d) research_lead / facility_causal_review_board にエスカレートする
     ⚠️ 未承認 intervention の実行実施は fatal（§13.5 参照）。
 ```
+
+**Phase 3 gate の operational 独自性**：4 軸は Ch4 §4.5.2 canonical と parity（mapping key 同一）だが、`method` フィールドが **SCM 特有の実装**（`intervention_support_mahalanobis` / `scm_counterfactual_variance` / `intervention_support_knn_in_observed` / `intervention_support_envelope`）を指す点、および第 5 軸 `scm_identifiability_check`（mediator path stability + SCM PPC + DAG consistency）が Phase 1 / Phase 2 gate に存在しない点で **operational に別物**。Ch14 の失敗パターン章はこの schema を直接参照する。
+
+**3 gate 活性化の canonical diff（S-1）**：`counterfactual_scope_gate` は本章で 3 回発火するが、mapping keys / method values / threshold source / aggregate policy が operationally 異なる。この差分を「同じ名前だから同じ意味」と誤読すると、fatal `reuse_counterfactual_scope_gate_check_names_across_phases_without_operational_distinction`（§13.5）に該当する：
+
+| 観点 | Phase 1 (§13.2.3, Ch9 §9.6) | Phase 2 (§13.3.3, Ch11 §11.7.2) | Phase 3 (§13.4.3, Ch13 §13.4.3) |
+|------|--------|--------|--------|
+| データ源 | 観測データ 500 obs | 応答曲面 posterior（24 runs + informative prior） | SCM 反実仮想 posterior |
+| `mahalanobis_check.method` | `distance_cluster_conditional`（cluster 分位点） | `posterior_predictive_mahalanobis`（PPC 分布） | `intervention_support_mahalanobis`（介入 arm 特有） |
+| `variance_check.method` | 経験的 CATE variance | `gp_predictive_variance`（GP kernel 由来） | `scm_counterfactual_variance`（SCM PPC 由来） |
+| `knn_density_check.k` | k=20（N=500） | k=5（N=24） | k=5（N=24 + counterfactual arm） |
+| `support_envelope_check` | non-strict（観測 support envelope） | strict（DoE 設計 support envelope） | strict（`intervention_support_envelope`、介入 arm outside 禁止） |
+| `threshold_calibration` | 過去 500 件から empirical calibration | Ch11 §11.7 GP posterior calibration | Ch13 SCM prior + response surface hybrid calibration |
+| 第 5 軸 | なし（4-check） | なし（4-check + threshold_calibration） | `scm_identifiability_check`（**5-check**：mediator_path_stability + scm_posterior_predictive_check + dag_of_record_consistency + sensitivity_analysis） |
+| `aggregate_policy.pass_requires` | `all_four_pass` | `all_four_pass_with_calibration` | `all_five_pass` |
+| `fail_action` | `fail_close_and_pre_register_applicability_manifest` | `fail_close_and_request_additional_doe` | `fail_close_and_route_back_to_phase_1_or_phase_2` |
 
 ### 13.4.4 Human 承認と evidence chain の最終化
 
@@ -660,7 +744,29 @@ evidence_chain:
     - phase: phase_3_scm_counterfactual
       gate_status: pass
       timestamp: <phase 3>
+
+  # === evidence_chain_sha256 の決定論的計算契約（B-6）===
+  evidence_chain_sha256_algorithm: sha256_json_canonical_rfc8785  # RFC 8785 JSON Canonicalization Scheme
+  evidence_chain_sha256_input_fields:          # 決定論的順序（改変で hash 変化）
+    - dag_authorization_uri
+    - dag_authorization_sha256
+    - approved_dag_uri
+    - approved_dag_sha256
+    - variable_selection_authorization_uri
+    - variable_selection_authorization_sha256
+    - approved_design_uri
+    - approved_design_sha256
+    - intervention_execution_authorization_uri
+    - intervention_execution_authorization_sha256
+    - approved_intervention_uri
+    - approved_intervention_sha256
+    - response_surface_provenance_uri
+    - refutation_gate_provenance_uri
+    - "counterfactual_scope_gate_history[*].{phase, gate_status, timestamp}"
+  evidence_chain_sha256: 8b1d3c...              # 上記フィールドを canonical JSON 化して sha256
 ```
+
+**再現性契約**：`evidence_chain_sha256` の計算は **RFC 8785 JSON Canonicalization Scheme** に固定。異なる実装（Python / Rust / Node.js）でも同一の hash が得られる。`<timestamp>` は ISO 8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`) に正規化。この pinning により、演習 13.4 の "silent DAG 差替え検出" が **operational に検証可能** になる。
 
 **Phase 3 完了時の状態**：
 - SCM 反実仮想で $x^*$ の predicted $V_{\text{OC}}$ = 0.978 V [0.951, 1.005]
@@ -698,6 +804,11 @@ prohibited_actions:
   - report_intervention_action_with_broken_evidence_chain          # ← Ch13 中核 fatal
   - modify_evidence_chain_after_approval                            # fatal（改竄）
   - reuse_evidence_chain_across_projects_without_re_authorization   # fatal（他プロジェクトへの流用）
+  - modify_evidence_chain_sha256_input_fields_after_publication     # fatal（B-6: hash 計算入力の後付け改変）
+
+  # === Scope gate 一貫性 ===
+  - bypass_scope_gate_reverification_between_phases                                       # fatal（Phase 遷移時に scope gate をスキップ）
+  - reuse_counterfactual_scope_gate_check_names_across_phases_without_operational_distinction  # fatal（Phase 1/2/3 で同じ mapping key を operationally 同一の意味で流用）
 ```
 
 ---
@@ -712,9 +823,11 @@ flowchart TD
     C -->|rejected| Z1[fail-close: DAG 再検討]
 
     D --> E[Ch6/Ch8: ATE/CATE 推定]
-    E --> F{Ch9: refutation_gate<br/>counterfactual_scope_gate 1}
-    F -->|fail| G[applicability_manifest で除外領域を pre-register]
-    F -->|pass| H[Skill 2a: DoE 提案]
+    E --> F1{Ch9: refutation_gate<br/>placebo/DML orthogonality/E-value}
+    F1 -->|fail| Z1a[fail-close: 観測データ再吟味]
+    F1 -->|pass| F2{Ch9: counterfactual_scope_gate 1<br/>4-check: mahalanobis/variance/knn/support}
+    F2 -->|fail| G[applicability_manifest で除外領域を pre-register]
+    F2 -->|pass| H[Skill 2a: DoE 提案]
     G --> H
 
     H --> I{Skill 2b: 変数選択承認<br/>L2 gate}
@@ -736,12 +849,13 @@ flowchart TD
     style C fill:#ffe0b2
     style I fill:#ffe0b2
     style P fill:#ffe0b2
-    style F fill:#fff9c4
+    style F1 fill:#e1bee7
+    style F2 fill:#fff9c4
     style M fill:#fff9c4
     style O fill:#fff9c4
 ```
 
-**橙色**：3 層承認ゲート（Human 承認必須）。**黄色**：`counterfactual_scope_gate` 発火点（3 箇所で operational に異なる）。
+**橙色**：3 層承認ゲート（Human 承認必須）。**紫色**：`refutation_gate`（因果識別の代替性テスト、Ch9 §9.7）。**黄色**：`counterfactual_scope_gate` 発火点（3 箇所で operational に異なる — Phase 1 は 4-check、Phase 2 は 4-check + threshold_calibration、Phase 3 は 5-check）。`refutation_gate` と `counterfactual_scope_gate` は **別の gate** であり、Phase 1 では両方 pass しないと Phase 2 へ進めない。
 
 ---
 
@@ -791,8 +905,8 @@ capstone_intervention_skill_contract:
 
   # === Facility scope escalation ===
   facility_scope_escalation:
-    triggers:
-      - approved_intervention_becomes_facility_standard  # Ch4 §4.6.2 enum 拡張候補
+    applies_to:                                    # Ch4 §4.6.2 canonical field name
+      - approved_intervention_becomes_facility_standard  # Ch4 §4.6.2 enum に back-register 済み
     default_approver: facility_causal_review_board
 ```
 
@@ -829,7 +943,12 @@ capstone_intervention_skill_contract:
 - [ ] `report_intervention_action_with_broken_evidence_chain` は fatal である
 - [ ] evidence chain の temporal ordering（L1 → L2 → L3）が strict に強制されている
 - [ ] `counterfactual_scope_gate` の 3 回発火が、operational に異なる schema を使っている（Ch9 §9.6 / Ch11 §11.7.2 / Ch13 §13.4.3）
-- [ ] `facility_scope_escalation` の trigger enum 拡張候補（`approved_intervention_becomes_facility_standard`）が Ch4 §4.6.2 で議論されている
+- [ ] `facility_scope_escalation.applies_to` enum に `approved_intervention_becomes_facility_standard` が Ch4 §4.6.2 に back-register 済み
+- [ ] Phase 1/2/3 の各 `counterfactual_scope_gate` に `fallback_message_template` が定義され、operator への告知文が明示されている
+- [ ] Phase 1/2/3 の各 `counterfactual_scope_gate.aggregate_policy.fail_action` が **異なる operational action** を指している（Phase 1: `fail_close_and_pre_register_applicability_manifest` / Phase 2: `fail_close_and_request_additional_doe` / Phase 3: `fail_close_and_route_back_to_phase_1_or_phase_2`）
+- [ ] `bypass_scope_gate_reverification_between_phases` および `reuse_counterfactual_scope_gate_check_names_across_phases_without_operational_distinction` が fatal として定義されている
+- [ ] `evidence_chain_sha256_algorithm: sha256_json_canonical_rfc8785` および `evidence_chain_sha256_input_fields` が明示されている
+- [ ] `modify_evidence_chain_sha256_input_fields_after_publication` が fatal として定義されている
 
 ---
 
@@ -845,7 +964,7 @@ capstone_intervention_skill_contract:
 
 ### 演習 13.3（Phase 3 の SCM 反実仮想と mediator 分解）
 
-§13.4.3 の SCM に対し dowhy の `estimate_effect` メソッドで `total_effect` / `direct_effect` / `indirect_effect` を計算せよ。film_thickness を mediator ではなく confounder として扱った場合の推定値との差分を評価し、mediator 誤配置が最適条件 $x^*$ にどう影響するかを議論せよ。
+§13.4.3 の SCM に対し dowhy の `estimate_effect` メソッドで `total_effect` / `direct_effect` / `indirect_effect` を計算せよ。film_thickness を mediator（Ch5 §5.2.2）ではなく confounder（Ch5 §5.2.1）として扱った場合の推定値との差分を評価し、mediator 誤配置が最適条件 $x^*$ にどう影響するかを議論せよ。さらに、film_thickness を collider（Ch5 §5.2.3）として adjustment set に含めた場合に生じる bias 方向を、backdoor criterion に照らして説明せよ（M-bias §5.2.4 とは別パターンである点にも触れよ）。
 
 ### 演習 13.4（3 層承認 evidence chain の SHA pinning）
 

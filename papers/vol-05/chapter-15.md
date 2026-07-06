@@ -28,14 +28,18 @@
 
 ```yaml
 hrd_diagnostic:
-  version: "v0.2"
+  version: "v0.3"
   scale_source:
     type: "gp_lengthscale"
     source_path: "kernel_spec.length_scale"
+    normalization_space: "unit_cube_per_bounds"  # x を [0,1] 正規化した空間で length_scale を評価
     exclude_variables: ["facility_id", "task_index"]
     applicable_feature_set: "continuous_ard_only"  # categorical は別診断
   # Ch7 準拠：per-dim length_scale で normalize してから合成
+  length_scale_clamping_ref: "vol-05:ch07:length_scale_clamping"  # ell_min_j, ell_max_j はここから
   ell_eff_definition: "ell_eff_j = clip(length_scale_j, ell_min_j, ell_max_j)"
+  ell_min_j_source: "Ch7 length_scale_clamping.per_dimension_lower_bound (unit-cube normalized)"
+  ell_max_j_source: "Ch7 length_scale_clamping.per_dimension_upper_bound (unit-cube normalized)"
   in_domain_criteria:                            # いずれかを採用（両方併記も可）
     - name: "mahalanobis_distance"
       formula: "min_i sqrt( sum_j ((x_j - x_ij) / ell_eff_j)^2 ) <= tau_D"
@@ -193,12 +197,16 @@ stale_pending_events:                           # append-only hash chain
 
 **症状**：batch acquisition が同一点を複数返す、または既に pending の点を再提案する。
 
-**診断契約**（Ch12 §12.7 + Ch14 §14.4.1 step 5）：
+**診断契約**（Ch12 §12.7 + Ch14 §14.4.1 step 5、Ch10 event_hash schema 準拠）：
 
 ```yaml
-duplicate_candidate_events:
+duplicate_candidate_events:                     # append-only、hash chain (Ch10 schema)
   - event_id: "evt-dup-20261210-001"
     event_hash: "sha256:..."
+    previous_event_hash: "sha256:..."           # ★ Ch10/Ch12 chain 規約
+    run_id: "run-2026-1210-04"                  # ★
+    skill_execution_id: "skill_exec_20261210_091500"  # ★
+    canonical_serialization_ref: "vol-05:ch10:event_canonical_serialization"  # ★
     detected_at: "2026-12-10T09:15:00Z"
     duplicate_pair:
       - candidate_id: "cand-A-01"
@@ -207,9 +215,10 @@ duplicate_candidate_events:
     detection_source: "post_hoc_pairwise_check"
     also_duplicate_with_pending: []             # 既存 pending との重複もチェック
     fallback_applied: "sequential_greedy_replan"
+    fallback_authorized_by: "auto:batch_diversity_policy.fallback_on_violation"  # policy が事前承認済み
 ```
 
-**是正契約**：`post_hoc_pairwise_check` を毎 iteration 実施（batch 内 + 既存 pending との pairwise 両方）。違反時は `batch_diversity_policy.fallback_on_violation` に従う。fallback を Skill が勝手に "無視" するのは fatal。
+**是正契約**：`post_hoc_pairwise_check` を毎 iteration 実施（batch 内 + 既存 pending との pairwise 両方）。違反時は `batch_diversity_policy.fallback_on_violation` に従う。fallback が事前 policy に無ければ Skill 単独判断は fatal（HIGH #7 参照）。
 
 ---
 
@@ -221,23 +230,45 @@ duplicate_candidate_events:
 
 ```yaml
 search_space_integrity_check:
-  version: "v0.2"
+  version: "v0.3"
   bounds_hash_spec:
     algorithm: "sha256"
     canonical_serialization:
-      json_style: "sorted_keys_canonical"        # RFC 8785 相当
+      standard: "RFC_8785_JCS"                   # ★ JCS を normative に指定
       encoding: "utf-8"
-      float_representation: "decimal_string_10_digits"
-      variable_order: "sorted_alphabetical"      # spec 内の変数キーは alphabetical
-      included_fields: ["variables", "types", "bounds", "units"]
-    example: |
-      canonical_input = {
-        "variables": ["x_pressure", "x_temperature"],
-        "types":     {"x_pressure": "continuous", "x_temperature": "continuous"},
-        "bounds":    {"x_pressure": [0.1, 5.0], "x_temperature": [25.0, 300.0]},
-        "units":     {"x_pressure": "MPa", "x_temperature": "degC"}
-      }
-      bounds_hash = sha256(json.dumps(canonical_input, sort_keys=True).encode("utf-8"))
+      float_representation:                      # ★ ambiguity 排除
+        format: "ieee754_double_hex"             # 例: 0x1.999999999999ap-4 for 0.1
+        alternative_format: "canonical_decimal"  # implementer 選択、hash 計算前に spec 内で単一化
+        chosen_format: "ieee754_double_hex"
+        special_values:
+          nan_policy: "reject_as_invalid"
+          positive_inf_policy: "reject_as_invalid"
+          negative_inf_policy: "reject_as_invalid"
+          negative_zero_policy: "normalize_to_positive_zero"
+        rounding_mode: "round_half_even"
+      key_ordering: "sorted_lexicographic_utf8"
+      variable_key_ordering: "sorted_lexicographic_utf8"
+      locale: "C_locale_only"
+    included_fields:
+      per_variable:
+        - "name"
+        - "type"                                 # continuous | integer | categorical | fixed
+        - "bounds_low"                            # continuous / integer
+        - "bounds_high"
+        - "bounds_inclusive_low"                  # {true, false}
+        - "bounds_inclusive_high"
+        - "choices"                               # categorical: ordered list
+        - "levels"                                # ordinal
+        - "fixed_value"                           # fixed
+        - "unit"
+        - "transform"                             # none | log | log10 | sqrt | boxcox
+        - "scale"                                 # linear | log | logit
+        - "encoding_ref"                          # Ch12 tensor_encoding_contract のキー
+      global:
+        - "variables_ordering"                    # spec 内の宣言順（別途 provenance）
+        - "constraint_expression_hashes"          # inequality/equality constraints
+        - "search_space_schema_version"
+    excluded_fields: ["comment", "human_notes", "created_at"]  # hash からは除外
   bounds_hash: "sha256:bbbb..."
   unit_declarations:                            # 全変数に unit を必須化
     x_temperature: "degC"
@@ -245,10 +276,12 @@ search_space_integrity_check:
   drift_detection:
     on_bounds_change_between_iterations: "fatal_new_run_required"
     on_unit_change: "fatal_new_run_required"
+    on_transform_or_scale_change: "fatal_new_run_required"
   authorized_change_events: []                  # Human 承認付き変更のみ許容
+  reference_implementation_ref: "vol-05:ch15:appendix:bounds_hash_reference_impl"
 ```
 
-**是正契約**：`bounds_hash` を run_id と紐付け、iteration 開始時に検証。ハッシュ不一致は fatal（新 run 必須、`dag_revision_policy` と同じ扱い）。
+**是正契約**：`bounds_hash` を run_id と紐付け、iteration 開始時に検証。ハッシュ不一致は fatal（新 run 必須、`dag_revision_policy` と同じ扱い）。実装は本章末の reference implementation に整合すべし。
 
 ---
 
@@ -260,27 +293,39 @@ search_space_integrity_check:
 
 ```yaml
 budget_reconciliation_check:
-  version: "v0.2"
+  version: "v0.3"                                # ★ invariant を数学的に正しく修正、reserved 定義を明確化
   status_source: "event_streams"                # entries の in-place status ではなく event streams から derive（Ch12 §12.3）
-  status_enum: ["completed", "failed", "in_progress", "reserved", "cancelled"]  # ★ 相互排他
-  disjoint_status_assertion: true                # 一つの experiment は 1 status のみ
+  status_enum: ["completed", "failed", "in_progress", "reserved_for_confirmation", "cancelled"]  # ★ 相互排他
+  disjoint_status_assertion: true
   count_definitions:
-    experiments_completed: "count(status == 'completed')"
-    experiments_failed:    "count(status == 'failed')"     # budget にカウントする（試料消費のため）
-    experiments_pending:   "count(status == 'in_progress')"
-    experiments_reserved:  "count(status == 'reserved')"
-    experiments_cancelled: "count(status == 'cancelled')"  # budget からは除外
+    experiments_completed:                "count(status == 'completed')"
+    experiments_failed:                   "count(status == 'failed')"       # budget にカウント（試料消費）
+    experiments_pending:                  "count(status == 'in_progress')"
+    experiments_reserved_for_confirmation: "count(status == 'reserved_for_confirmation')"  # Ch14 §14.2.4 の予備枠
+    experiments_cancelled:                "count(status == 'cancelled')"    # budget からは除外
+  reservation_events_ref: "vol-05:ch14:experiment_reservation_events"       # append-only、Human 承認付き
+  status_transition_events_ref: "vol-05:ch12:experiment_status_transition_events"
   derivation_formula:
-    available_for_bo: "total - completed - failed - pending - reserved"  # cancelled は 0 kill、total からも除く運用も可（下記）
+    available_for_bo: "total_budget - completed - failed - pending - reserved_for_confirmation"  # cancelled は total_budget から控除しない（試料未消費）
+  budget_invariant:                              # ★ 数学的に正しい invariant
+    equation: "total_budget == completed + failed + pending + reserved_for_confirmation + available_for_bo"
+    disjointness: "cancelled disjoint from {completed, failed, pending, reserved_for_confirmation, available_for_bo}"
   cancellation_policy:
-    include_in_total: false                      # cancelled は total からも除外（試料未消費）
-    if_sample_consumed: "treat_as_failed"        # 試料消費されていれば failed 扱いに再分類
-  budget_invariant:
-    "total == completed + failed + pending + reserved  AND  cancelled disjoint from all"
+    include_in_total_budget: false               # cancelled は total_budget からも除外（試料未消費が前提）
+    reclassification:                            # ★ MEDIUM #9：cancelled → failed 判定を deterministic 化
+      rule: "if sample_consumption_events include target_experiment_id then reclassify status='cancelled' → 'failed'"
+      required_evidence_events:
+        - "sample_consumption_events (試料消費記録、Ch5 provenance 21 field と紐付け)"
+        - "resource_consumption_events (装置時間・コスト記録)"
+      precedence: "sample_consumption > resource_only_consumption > no_consumption"
+      partial_consumption_policy:
+        if_sample_partial: "treat_as_failed"
+        if_only_device_time_consumed: "treat_as_cancelled_with_cost_note"  # budget からは除外だが cost log に残す
+        determined_by: "human:project_lead OR auto:audit_skill if evidence unambiguous"
   fatal_on_invariant_violation: true
 ```
 
-**是正契約**：`experiments_available_for_bo` の計算式を invariant として毎 iteration 検証。違反は fatal（新 iteration 開始不可）。
+**是正契約**：`available_for_bo` の計算式を invariant として毎 iteration 検証。違反は fatal（新 iteration 開始不可）。cancelled → failed 再分類は evidence event に基づき deterministic。
 
 ---
 
@@ -314,13 +359,15 @@ acquisition_change_events:                      # append-only、hash chain
 
 **是正契約**：`acquisition_spec.name` の変更は必ず `acquisition_change_events` に記録、Human 承認付き。Skill が `changed_by: skill:*` を書いたら fatal。
 
-**★ Cross-family transition rule（例：qLogNEI → qLogNEHVI）**：single-objective acquisition から multi-objective acquisition への変更は acquisition 単独では成立しない。以下 3 event stream が同一 approval_id で **同時に** 追加されない限り fatal：
+**★ Cross-family transition rule**：acquisition family 変更は acquisition 単独では成立しない。以下のケースごとに、**同一 approval_id で必要な event stream を同時 append** しなければ fatal。
 
-- `acquisition_change_events`：`from_family: single_objective → to_family: multi_objective`
-- `objective_mode_change_events`：objective_mode の再宣言（Ch13 canonical enum）
-- `objectives_spec_change_events`：objectives 配列（≥ 2）と reference_point / hv_scale の宣言
-
-これらいずれかを欠いた変更は Skill にも Human にも fatal（新 run を開始すべき）。
+| From family | To family | 追加で必要な同時 event streams | 例 |
+|---|---|---|---|
+| single_objective | single_objective | なし | qLogNEI → qUCB |
+| single_objective | multi_objective | `objective_mode_switch_events` (Ch13 canonical) + `objectives_spec_change_events` (objectives ≥ 2, reference_point, hv_scale) | qLogNEI → qLogNEHVI |
+| multi_objective | multi_objective | なし（objectives_spec 不変時） | qLogEHVI → qLogNEHVI |
+| multi_objective | multi_objective_via_scalarization | `objectives_spec_change_events`（`scalarization.allowed: true` + `weight_sampling` schema 宣言）+ Ch9 `weights_change_events`。objective_mode は `optimization` のまま | qLogEHVI → qParEGO |
+| any | multi_objective_via_scalarization from `scalarization.allowed: false` | 上記に加え `scalarization_enable_events`（Human 承認付き） | 初回スカラー化許可 |
 
 Family 分類 canonical：
 
@@ -329,6 +376,8 @@ Family 分類 canonical：
 | qLogEI / qLogNEI / qUCB / qPI / qKG / qMES / qTS / qPES | single_objective |
 | qLogEHVI / qLogNEHVI | multi_objective |
 | qParEGO / qNParEGO | multi_objective_via_scalarization |
+
+いずれかを欠いた変更は Skill にも Human にも fatal（新 run を開始すべき）。event stream 間の approval_id 一致は audit の必須項目。
 
 ---
 
@@ -356,36 +405,58 @@ prediction_reporting_contract:
 
 ### 15.2.3 Human 承認なしに次の候補を実行
 
-**症状**：Skill が「承認は形式的だし、私が実行しても同じ」と判断して自律実行。**vol-05 の安全 invariant 最大の破り**。**特に、approval_event_hash chain の整合性や candidate_hash の一致確認を省略すると、承認済みだが別候補を実行する fatal を検出できない。**
+**症状**：Skill が「承認は形式的だし、私が実行しても同じ」と判断して自律実行。**vol-05 の安全 invariant 最大の破り**。**特に、approval_event_hash chain の整合性や candidate_hash の一致確認、parent L3 ゲートの pass 確認を省略すると、承認済みだが別候補を実行する fatal を検出できない。**
 
-**診断契約**（Ch5 準拠、機械検証）：
+**診断契約**（Ch5 §5.3 canonical schema 準拠、機械検証）：
 
 ```yaml
 experiment_launch_precondition_check:
-  version: "v0.2"
+  version: "v0.3"                                # ★ Ch5 canonical field 名に整合
+  target_authorization_ref: "experiment_launch_authorization"  # Ch5 §5.3
   required_before_launch:
-    - name: "approval_id_present"
-      predicate: "experiment_launch_authorization.approval_id != null"
-    - name: "approved_by_is_human"
-      predicate: "matches_regex(experiment_launch_authorization.approved_by, '^human:')"
-    - name: "candidate_authorized"
-      predicate: "target_candidate_id IN experiment_launch_authorization.scope.authorized_candidate_ids"
-    - name: "candidate_hash_match"                     # ★ 追加
-      predicate: "sha256(target_candidate_spec_canonical) == experiment_launch_authorization.scope.candidate_hash_map[target_candidate_id]"
+    # --- Ch5 core fields ---
+    - name: "authorization_id_present"
+      predicate: "experiment_launch_authorization.authorization_id != null"
+    - name: "status_is_approved"                # Ch5 status enum: pending | approved | denied
+      predicate: "experiment_launch_authorization.status == 'approved'"
+    - name: "approver_is_human"
+      predicate: "matches_regex(experiment_launch_authorization.approver_id, '^human:')"
+    # --- Parent (vol-04 L3) gate ---
+    - name: "parent_authorization_present"      # Ch5 §5.3 要件 3：bypass 禁止
+      predicate: "experiment_launch_authorization.parent_authorization_id != null"
+    - name: "parent_l3_status_approved"         # Ch5 requirement 2：両ゲート pass
+      predicate: "experiment_launch_authorization.parent_l3_status == 'approved'"
+    # --- Scope match ---
+    - name: "candidate_in_scope"
+      predicate: "target_candidate_id IN experiment_launch_authorization.approval_scope.authorized_candidate_ids"
+    - name: "candidate_hash_match"              # Ch5 §5.3 approval_scope.candidate_hash (singular)
+      predicate: "sha256(canonical(target_candidate_spec)) == experiment_launch_authorization.approval_scope.candidate_hash"
+    - name: "iteration_index_match"             # Ch5 approval_scope.iteration_index
+      predicate: "current_iteration_index == experiment_launch_authorization.approval_scope.iteration_index"
+    - name: "batch_size_respected"
+      predicate: "batch_size_to_launch <= experiment_launch_authorization.approval_scope.max_experiments_authorized"
+    # --- Constraint / budget precheck ---
+    - name: "constraint_precheck_pass"          # Ch10 §10.x
+      predicate: "constraint_precheck.result == 'pass'"
+    - name: "budget_precheck_pass"              # Ch5 §5.3 budget_precheck block
+      predicate: "experiment_launch_authorization.budget_precheck.check_pass == true"
+    # --- Freshness / integrity ---
     - name: "approval_recent"
       predicate: "now - experiment_launch_authorization.approved_at < 48h"
-    - name: "approval_event_hash_chain_integrity"     # ★ 追加
-      predicate: "verify_hash_chain(approval_events, seed_hash=run_id_seed_hash)"
-    - name: "approval_event_matches_authorization"    # ★ 追加
-      predicate: "experiment_launch_authorization.event_hash == last(approval_events).event_hash"
-    - name: "no_intervening_revocation"                # ★ 追加
-      predicate: "no revocation_event with approval_id == experiment_launch_authorization.approval_id"
+    - name: "approval_event_hash_chain_integrity"
+      predicate: "verify_hash_chain(authorization_events_stream, anchor_hash=run_id_anchor_hash)"
+    - name: "no_intervening_denial_or_revocation"
+      predicate: "no revocation_or_denial_event with authorization_id == experiment_launch_authorization.authorization_id"
+  authorization_events_stream_ref: "vol-05:ch05:authorization_events_stream (Ch10 event_hash schema)"
   fatal_on_any_missing: true
   fatal_on_hash_chain_break: true
-  audit_trail_ref: "vol-05:ch05:experiment_launch_audit_log_v0_1"
+  audit_trail_ref: "vol-05:ch05:experiment_launch_authorization_log"
 ```
 
 **是正契約**：launch 前に上記チェックを機械実施。1 つでも欠けたら、または hash chain が破損したら fatal。監査ログに Skill 実行の全 attempt を append。
+
+> [!NOTE]
+> `authorization_events_stream` / `revocation_or_denial_event` は Ch10 event_hash schema を再利用する append-only event stream。Ch5 は現状「approval 記録」を dict として定義するが、audit 用 event stream として同 dict を append し `event_hash` chain を張る運用を Ch15 は要求する（Ch5 §5.3 の back-registration 対象）。
 
 ---
 
@@ -405,9 +476,22 @@ seed_integrity_check:
       fatal_on_fail: true
     runtime_intercept:
       when: "each acquisition / candidate_generation call"
-      predicate: "seed argument passed to sampler == pinned_seeds[step_name]"
-      mechanism: "sampler_call_hook logs (step_name, seed_used, timestamp)"
+      predicate: "sampler invocation records match pinned_seeds AND rng state is deterministic"
+      mechanism: "sampler_call_hook installed at the sampler boundary (BoTorch: SobolQMCNormalSampler / IIDNormalSampler wrapper; Ax: GenerationStrategy hook; custom: monkey-patch)"
+      hook_fields_required:                        # ★ portable across BoTorch / Ax / custom
+        - "step_name"                              # e.g., 'acquisition_qLogNEI_iter5'
+        - "sampler_class"                          # e.g., 'botorch.sampling.SobolQMCNormalSampler'
+        - "library_name"                           # 'botorch' | 'ax' | 'gpytorch' | 'numpy' | 'custom'
+        - "library_version"
+        - "seed_argument_used"                     # 明示 seed
+        - "generator_id"                           # torch.Generator id / numpy Generator id
+        - "rng_state_hash_before"                  # torch/numpy 双方
+        - "rng_state_hash_after"
+        - "base_samples_hash"                      # qMC base samples がキャッシュされる場合
+        - "cache_hit"                              # base_samples cache 使用有無
+        - "call_timestamp"
       fatal_on_mismatch: true
+      fatal_on_missing_hook_fields: true
     post_iteration:
       when: "iteration end"
       predicate: "pinned_seeds == observed_used_seeds_from_hook_log"
@@ -456,13 +540,16 @@ stop_condition_relaxation_check:
 
 ```yaml
 scalarization_integrity_check:
-  version: "v0.1"
-  objectives_spec.scalarization.allowed: false  # 既定
-  detected_scalarization_use: false             # true なら fatal
+  version: "v0.2"
+  scalarization_allowed_path: "objectives_spec.scalarization.allowed"  # ★ path DSL 明示
+  scalarization_allowed_default: false
+  detected_scalarization_use: false             # true かつ path 値が false なら fatal
+  weight_sampling_schema_declared: false        # allowed: true なら宣言必須
   weights_change_events: []                      # allowed: true でも Human 承認必須
+  scalarization_enable_events: []                # false → true への変更は Human 承認付き
 ```
 
-**是正契約**：`scalarization.allowed: false` で qParEGO を Skill が呼んだら fatal。allowed: true でも weight は `weight_sampling` schema と `weights_change_events` に従う。
+**是正契約**：`path=objectives_spec.scalarization.allowed` が false のとき qParEGO を Skill が呼んだら fatal。true でも weight は `weight_sampling` schema と `weights_change_events` に従う。
 
 ---
 
@@ -502,28 +589,44 @@ pipeline_execution_audit:
 
 ```yaml
 contract_version_pin_integrity_check:
-  version: "v0.1"
-  contract_pin_hash_chain:                       # ★ contract_version_pin 自体を append-only hash chain 化
+  version: "v0.2"
+  # ★ Root of trust: 独立ストレージ + 外部タイムスタンプ
+  root_of_trust:
+    immutable_log_uri: "s3://arim-audit-immutable/run-2026-1210-04/contract_pin_chain.jsonl"  # 例
+    append_only_backend: "object_lock_compliance_mode"                # 例: AWS S3 Object Lock, WORM
+    writer_identity: "human:project_lead_XXXX"                        # Skill は writer になれない
+    writer_identity_restriction: "^human:"                            # regex
+    auditor_identity: "auto:audit_skill_v0_1"
+    read_only_audit_credentials: "iam_role:audit_readonly"            # 監査は read-only
+    chain_anchor_hash: "sha256:anchor..."                             # 初回に Human が発行、run_id と紐付け
+    external_timestamp_authority: "rfc3161_tsa"                        # 例: freeTSA / DigiCert
+    external_timestamp_required_per_event: true
+  contract_pin_hash_chain:                       # append-only hash chain
     - event_id: "evt-pin-run-2026-1210-04-init"
       event_hash: "sha256:pin0..."
       previous_event_hash: null
+      chain_anchor_hash_ref: "sha256:anchor..."  # anchor に一致必須
       created_at: "2026-12-10T09:00:00Z"
+      external_timestamp: "2026-12-10T09:00:01Z" # TSA 署名
       created_by: "human:project_lead_XXXX"
-      pinned_payload_hash: "sha256:payload0..." # bounds_hash + seed + stop_condition + acquisition_spec + ... の canonical serialization
-    # 以降、Human 承認付き revision のみ append 可
+      pinned_payload_hash: "sha256:payload0..." # bounds_hash + seed + stop_condition + acquisition_spec + objectives_spec の canonical serialization
   runtime_verification:
     on_iteration_start:
-      predicate: "hash(contract_version_pin_current_payload) == last(contract_pin_hash_chain).pinned_payload_hash"
+      predicate: "hash(canonical(current_pinned_payload)) == last(contract_pin_hash_chain).pinned_payload_hash"
       fatal_on_mismatch: true
     on_chain_break:
-      predicate: "each event.previous_event_hash == previous event.event_hash"
+      predicate: "each event.previous_event_hash == previous event.event_hash AND event.chain_anchor_hash_ref == root_of_trust.chain_anchor_hash"
       fatal_on_break: true
-  storage_recommendations:
-    - "hash chain を実験 log と別ストレージに保存（Skill が書き換えられない場所）"
+    on_local_vs_remote_divergence:                # local と immutable_log の乖離検出
+      predicate: "local_chain_tail == remote_chain_tail (fetched via read_only credentials)"
+      fatal_on_divergence: true
+  storage_requirements:
+    - "hash chain を Skill が書けない storage に保存（IAM で writer_identity を human に制限）"
     - "audit skill が独立プロセスで chain を再計算・比較"
+    - "external timestamp で 'Skill が過去に遡って書換' を検出"
 ```
 
-**是正契約**：contract_version_pin の payload hash を hash chain の末端と照合。書き換えは fatal（新 run 開始）。
+**是正契約**：contract_version_pin の payload hash を root_of_trust に anchor された hash chain の末端と照合。書き換えは fatal（新 run 開始）。ローカルコピーと immutable log の tail が乖離したら fatal。
 
 ---
 
@@ -533,9 +636,9 @@ Skill 監査を自動化する統合契約：
 
 ```yaml
 bo_agentic_audit_checklist:
-  version: "v0.2"
+  version: "v0.3"
   run_id: "run-2026-1210-04"
-  check_schema:                                  # ★ 各 check の共通 schema
+  check_schema:                                  # 各 check の共通 schema
     fields: ["id", "result", "ref", "severity_on_fail", "blocks_next_iteration", "remediation_ref"]
     severity_enum: ["low", "medium", "high", "fatal"]
     result_enum:   ["pass", "fail_recoverable", "fail_fatal", "n/a"]
@@ -546,7 +649,9 @@ bo_agentic_audit_checklist:
     - {id: "pareto_convergence",      result: "n/a",  ref: "pareto_convergence_diagnostic",     severity_on_fail: "medium", blocks_next_iteration: false, remediation_ref: "vol-05:ch15:15.1.4"}
     - {id: "safe_bo_calibration",     result: "pass", ref: "safe_bo_calibration_check",         severity_on_fail: "high",   blocks_next_iteration: true,  remediation_ref: "vol-05:ch15:15.1.5"}
     - {id: "stale_pending",           result: "pass", ref: "stale_pending_events",              severity_on_fail: "medium", blocks_next_iteration: false, remediation_ref: "vol-05:ch15:15.1.6"}
-    - {id: "duplicate_candidates",    result: "pass", ref: "duplicate_candidate_events",        severity_on_fail: "medium", blocks_next_iteration: false, remediation_ref: "vol-05:ch15:15.1.7"}
+    # ★ HIGH #7: duplicate check を 2 分割
+    - {id: "duplicate_detection_run", result: "pass", ref: "duplicate_candidate_events",        severity_on_fail: "medium", blocks_next_iteration: false, remediation_ref: "vol-05:ch15:15.1.7"}
+    - {id: "duplicate_fallback_authorized", result: "pass", ref: "batch_diversity_policy.fallback_on_violation", severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.1.7"}
     - {id: "unit_bounds_drift",       result: "pass", ref: "search_space_integrity_check",      severity_on_fail: "fatal",  blocks_next_iteration: true,  remediation_ref: "vol-05:ch15:15.1.8"}
     - {id: "budget_reconciliation",   result: "pass", ref: "budget_reconciliation_check",       severity_on_fail: "fatal",  blocks_next_iteration: true,  remediation_ref: "vol-05:ch15:15.1.9"}
   agentic_specific_checks:                      # セクション 2
@@ -554,15 +659,18 @@ bo_agentic_audit_checklist:
     - {id: "prediction_reporting_complete",         result: "pass", ref: "prediction_reporting_contract",            severity_on_fail: "high",  blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.2"}
     - {id: "experiment_launch_precondition",        result: "pass", ref: "experiment_launch_precondition_check",     severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.3"}
     - {id: "seed_integrity",                        result: "pass", ref: "seed_integrity_check",                     severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.4"}
-    - {id: "pending_cancellation_authorized",       result: "pass", ref: "cancellation_events (human only)",         severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.5"}
+    - {id: "pending_cancellation_authorized",       result: "pass", ref: "vol-05:ch12:cancellation_events (human only)", severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.5"}
     - {id: "stop_condition_not_relaxed",            result: "pass", ref: "stop_condition_relaxation_check",          severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.6"}
     - {id: "scalarization_authorized",              result: "pass", ref: "scalarization_integrity_check",            severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.7"}
-    - {id: "objective_mode_switch_authorized",      result: "pass", ref: "objective_mode_switch_events",             severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.8"}
+    # ★ HIGH #3: 正式名 objective_mode_switch_events (Ch13 canonical)
+    - {id: "objective_mode_switch_authorized",      result: "pass", ref: "vol-05:ch13:objective_mode_switch_events", severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.8"}
     - {id: "pipeline_execution_order",              result: "pass", ref: "pipeline_execution_audit",                 severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.9"}
     - {id: "contract_pin_meta_integrity",           result: "pass", ref: "contract_version_pin_integrity_check",     severity_on_fail: "fatal", blocks_next_iteration: true, remediation_ref: "vol-05:ch15:15.2.10"}
-  cross_cutting_checks:                          # ★ 追加：iteration をまたぐ健全性
-    - {id: "task_correlation_drift",  result: "pass", ref: "task_correlation_drift_diagnostic", severity_on_fail: "high",   blocks_next_iteration: false, remediation_ref: "vol-05:ch11:MTGP"}
-    - {id: "dag_revision_integrity",  result: "pass", ref: "dag_revision_events (Ch14)",        severity_on_fail: "fatal",  blocks_next_iteration: true,  remediation_ref: "vol-05:ch14:14.4"}
+  cross_cutting_checks:                          # iteration をまたぐ健全性
+    # ★ HIGH #3: 正式名 task_correlation_matrix (Ch11)、degeneracy 診断は tilde_B_normalized.diagnostic 経由 (Ch14 §14.3)
+    - {id: "task_correlation_matrix_healthy", result: "pass", ref: "vol-05:ch11:task_correlation_matrix (tilde_B_normalized.diagnostic)", severity_on_fail: "high",  blocks_next_iteration: false, remediation_ref: "vol-05:ch11:MTGP degeneracy"}
+    # ★ HIGH #3: 正式名 dag_revision_policy (Ch14)
+    - {id: "dag_revision_policy_respected",   result: "pass", ref: "vol-05:ch14:dag_revision_policy",                      severity_on_fail: "fatal", blocks_next_iteration: true,  remediation_ref: "vol-05:ch14:14.4"}
   overall_status: "pass"                         # enum: pass | fail_recoverable | fail_fatal
   overall_status_derivation:
     fail_fatal_if: "any(check.result == 'fail_fatal') OR any(check.result == 'fail_recoverable' AND check.severity_on_fail == 'fatal')"
@@ -583,22 +691,41 @@ bo_agentic_audit_checklist:
 
 ## 15.4 Skill 契約チェックリスト（audit 用）
 
+§15.3 の `bo_agentic_audit_checklist` v0.3 の全 check を運用チェックリスト化：
+
+**General BO checks (§15.1)**：
+
 - [ ] `hrd_diagnostic.fatal_on_undeclared_extrapolation: true`
-- [ ] `length_scale_health_check` が全 iteration で実行
+- [ ] `length_scale_health_check` が全 iteration で実行、`applicable_feature_set: continuous_ard_only`
 - [ ] `acquisition_optimization_health` に multi-start dispersion 記録
-- [ ] `pareto_convergence_diagnostic` の unexplored_region_test を multi-objective で実施
-- [ ] `safe_bo_calibration_check.calibration_gap` を継続監視
-- [ ] `stale_pending_events` は Skill 自律キャンセル禁止
-- [ ] `duplicate_candidate_events` は batch 内 + 既存 pending 両方を対象
-- [ ] `search_space_integrity_check.bounds_hash` を run_id と紐付け
-- [ ] `budget_reconciliation_check.status_source: event_streams`
-- [ ] `acquisition_change_events.changed_by` が `human:*` のみ許容
+- [ ] `pareto_convergence_diagnostic.unexplored_region_test` を multi-objective で probe set (Sobol) と共に実施
+- [ ] `safe_bo_calibration_check.calibration_gap` を継続監視（overconfident 検出）
+- [ ] `stale_pending_events.stale_status` enum に沿って Skill 自律キャンセル禁止
+- [ ] `duplicate_candidate_events`：batch 内 + 既存 pending 両方を対象
+- [ ] `duplicate_fallback` は `batch_diversity_policy.fallback_on_violation` に事前宣言、Skill 単独判断なし
+- [ ] `search_space_integrity_check.bounds_hash` (RFC 8785 JCS + IEEE754 double hex) を run_id と紐付け
+- [ ] `budget_reconciliation_check.status_source: event_streams`、invariant `total == completed + failed + pending + reserved_for_confirmation + available_for_bo`
+
+**Agentic-specific checks (§15.2)**：
+
+- [ ] `acquisition_change_events.changed_by` が `human:*` のみ許容、cross-family transition は必要 event streams を同時 append
 - [ ] `prediction_reporting_contract.required_fields_for_prediction_report` を欠かない
-- [ ] `experiment_launch_precondition_check` が launch 前に機械実行
-- [ ] `seed_integrity_check` が iteration 終了時に照合
+- [ ] `experiment_launch_precondition_check` が Ch5 canonical field 名（authorization_id / approver_id / approval_scope / parent_authorization_id / parent_l3_status）で機械実行
+- [ ] `seed_integrity_check` 3 段階（pre / runtime_intercept / post）で照合、`sampler_call_hook` フィールド完備
+- [ ] `cancellation_events`（Ch12）は Human 承認付きのみ
 - [ ] `stop_condition_relaxation_check` が iteration 開始時に hash pin と照合
-- [ ] `scalarization_integrity_check.detected_scalarization_use` が allowed でない限り false
+- [ ] `scalarization_integrity_check.scalarization_allowed_path` が false の限り `detected_scalarization_use: false`
+- [ ] `objective_mode_switch_events`（Ch13 canonical）で Skill 自律 switch を fatal 検出
 - [ ] `pipeline_execution_audit.expected_order` と actual_order が一致
+- [ ] `contract_version_pin_integrity_check.root_of_trust` が独立 immutable storage + external timestamp で保護
+
+**Cross-cutting checks**：
+
+- [ ] `task_correlation_matrix.tilde_B_normalized.diagnostic`（Ch11 / Ch14）が degenerate でない
+- [ ] `dag_revision_policy`（Ch14）が遵守されている
+
+**総合**：
+
 - [ ] `bo_agentic_audit_checklist.overall_status: pass` を次 iteration の gate 条件に
 
 ---

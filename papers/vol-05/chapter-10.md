@@ -398,7 +398,219 @@ safe_bo_config:
 
 ---
 
-## 10.5 制約破りの失敗パターン（Ch15 プレビュー）
+<a id="event_canonical_serialization"></a>
+
+## 10.5 event_hash schema (canonical)
+
+> [!IMPORTANT]
+> **canonical anchor**：`vol-05:ch10:event_canonical_serialization`
+>
+> 本節は **vol-05 全体の append-only event stream の canonical schema SoT** である。以下の全ての append-only event stream は本 schema を再利用する：
+>
+> - Ch10 §10.2.4 `constraint_violation_events`
+> - Ch12 `cancellation_events` / `pending_status_events` / `experiment_status_transition_events`（Ch12 §12.7 で定義、Ch15 §15.1 で診断契約）
+> - Ch13 `objective_mode_switch_events`
+> - Ch14 `dag_revision_events` / `experiment_reservation_events`
+> - Ch15 `acquisition_change_events` / `duplicate_candidate_events` / `contract_pin_hash_chain`
+> - Ch5 `authorization_events_stream` / `experiment_launch_authorization_log`（Ch5 §5.3 で back-register）
+> - vol-04 Ch4 §4.6.2 `agent_action_log.gate_interaction_events`（v0.2 で本 schema を継承）
+> - vol-03 checkpoint registry の optional `previous_event_hash`（parity 継承）
+
+### 10.5.1 Schema フィールド
+
+```yaml
+event_hash_schema:
+  version: "v0.1"
+  fields:
+    event_id: <string>                          # canonical id（e.g., "evt-cv-20261121-001"）
+    event_hash: <string>                        # sha256(canonical_serialize(payload))
+    previous_event_hash: <string|null>          # 直前 event の event_hash（genesis event は null）
+    run_id: <string>                            # run 単位の canonical id
+    skill_execution_id: <string>                # skill 実行単位の canonical id
+    created_at: <timestamp>                     # ISO 8601 (UTC 推奨)
+    created_by: <string>                        # writer identity（Skill / Human）。canonical regex `^(skill|human):`
+    payload: <object>                           # 各 event stream 固有の内容
+  required_fields: [event_id, event_hash, previous_event_hash, run_id, skill_execution_id, created_at, created_by]
+  chain_semantics:
+    genesis_previous_event_hash: null           # 各 stream の最初の event は null
+    mismatch_action: fatal                      # チェーン不整合は Skill fatal
+    append_only: true                           # 既存 event の書換は fatal
+  writer_identity_restriction:
+    default: "^skill:"                          # Skill が書き込む event（大多数）
+    exceptions: "^human:"                       # HITL 承認記録は human が writer（vol-05 §5.3 と共通）
+```
+
+### 10.5.2 canonical serialization 規約
+
+`event_hash` は **payload を canonical serialize した結果の SHA256** として計算する：
+
+```yaml
+canonical_serialization:
+  standard: "RFC 8785 JCS (JSON Canonicalization Scheme)"
+  encoding: "UTF-8"
+  sort_keys: true                               # 全キーを sorted で出力
+  no_trailing_newline: true                     # 末尾改行なし
+  separators: [",", ":"]                        # コンパクト形（空白なし）
+```
+
+**Python での計算例**：
+
+```python
+import json, hashlib
+
+def compute_event_hash(payload: dict) -> str:
+    """canonical (RFC 8785 JCS 相当) serialization + SHA256"""
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=False,
+    ).encode('utf-8')
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+# event chain 検証
+def verify_chain(events: list) -> bool:
+    prev = None
+    for e in events:
+        if e['previous_event_hash'] != prev:
+            return False                        # チェーン不整合 → fatal
+        recomputed = compute_event_hash(e['payload'])
+        if e['event_hash'] != recomputed:
+            return False                        # payload 改ざん → fatal
+        prev = e['event_hash']
+    return True
+```
+
+> [!IMPORTANT]
+> **payload に含めるフィールド**：`event_hash` の入力となる payload は、`event_id` / `event_hash` / `previous_event_hash` を **含めず**、その他の全てのフィールド（run_id, skill_execution_id, created_at, created_by, および event-specific なフィールド）を含む。これにより event_hash 自身は payload に含まれず、循環依存を避ける。
+
+### 10.5.3 event stream への適用パターン
+
+各 event stream は本 schema を継承し、`payload` フィールドに固有の情報を格納する。
+
+**例：`constraint_violation_events`（本章 §10.2.4）**：
+
+```yaml
+constraint_violation_events:
+  - event_id: "evt-cv-20261121-001"             # §10.5.1 canonical
+    event_hash: "sha256:cur..."                  # §10.5.2 で計算
+    previous_event_hash: "sha256:def456..."     # §10.5.1 canonical
+    run_id: "run-2026-1121-A01"                  # §10.5.1 canonical
+    skill_execution_id: "skill-exec-XX-YY"      # §10.5.1 canonical
+    created_at: "2026-11-21T10:23:45Z"           # §10.5.1 canonical
+    created_by: "skill:constraint_filter"        # §10.5.1 canonical
+    payload:                                     # event-specific fields
+      iteration: 7
+      detection_stage: "pre_authorization_filter"
+      constraint_name: "temperature_upper_bound"
+```
+
+### 10.5.4 バックリファレンス表
+
+| stream | 章 | anchor | 補足 |
+|:---|:---|:---|:---|
+| `constraint_violation_events` | Ch10 §10.2.4 | 本章内 | 本 schema を SoT として参照 |
+| `cancellation_events` | Ch12 §12.7 | `vol-05:ch12:cancellation_events` | 本 schema 準拠 |
+| `pending_status_events` | Ch12 §12.7 | `vol-05:ch12:pending_status_events` | 本 schema 準拠 |
+| `experiment_status_transition_events` | Ch12 §12.7 | `vol-05:ch12:experiment_status_transition_events` | 本 schema 準拠、pending → in_progress → completed/failed/cancelled 遷移 |
+| `objective_mode_switch_events` | Ch13 §13.4 | `vol-05:ch13:objective_mode_switch_events` | 本 schema 準拠 |
+| `dag_revision_events` | Ch14 §14.5 | `vol-05:ch14:dag_revision_events` | 本 schema 準拠 |
+| `experiment_reservation_events` | Ch14 §14.5 | `vol-05:ch14:experiment_reservation_events` | 装置予約枠 event |
+| `acquisition_change_events` | Ch15 §15.2 | `vol-05:ch15:acquisition_change_events` | 本 schema 準拠 |
+| `duplicate_candidate_events` | Ch15 §15.1.7 | `vol-05:ch15:duplicate_candidate_events` | 本 schema 準拠 |
+| `contract_pin_hash_chain` | Ch15 §15.3 | `vol-05:ch15:contract_pin_hash_chain` | 本 schema 準拠 |
+| `authorization_events_stream` | Ch5 §5.3 | `vol-05:ch05:authorization_events_stream` | Ch5 back-registration |
+| `experiment_launch_authorization_log` | Ch5 §5.3 | `vol-05:ch05:experiment_launch_authorization_log` | Ch5 back-registration |
+| vol-04 `gate_interaction_events` | vol-04 Ch4 §4.6.2 | v0.2 拡張 | 本 schema を継承 |
+| vol-03 checkpoint registry | vol-03 appendix-a | optional `previous_event_hash` | parity |
+
+---
+
+<a id="hard_constraints_ceramic_v0_2"></a>
+
+## 10.6 hard_constraints_ceramic_v0_2 — セラミック焼成の具体例
+
+> [!IMPORTANT]
+> **canonical anchor**：`vol-05:ch10:hard_constraints_ceramic_v0_2`
+>
+> vol-05 Ch14 §14.2.1 の `hard_constraints_ref: "vol-05:ch10:hard_constraints_ceramic_v0_2"` が参照する具体制約セット。
+> `causal_dag_ceramic_v1`（vol-04 §C.12）を search space の SoT とし、施設運用上の安全マージンをここで宣言する。
+
+```yaml
+hard_constraints_ceramic_v0_2:
+  version: "v0.2"
+  domain: "ceramic_sintering"
+  dag_of_record_ref: "vol-04:appendix-c:causal_dag_ceramic_v1"
+  hard_constraints:
+    - name: "temperature_upper_bound"
+      variable: "x_temperature"
+      operator: "<="
+      threshold: 800.0
+      unit: "degC"
+      rationale: "装置耐熱上限（メーカー仕様、DAG 名目 range 200-900 を装置制約で 200-800 に narrow）"
+      enforcement: "pre_authorization_filter"
+      violation_action: "fatal"
+    - name: "temperature_lower_bound"
+      variable: "x_temperature"
+      operator: ">="
+      threshold: 200.0
+      unit: "degC"
+      rationale: "焼結開始温度下限"
+      enforcement: "pre_authorization_filter"
+      violation_action: "fatal"
+    - name: "pressure_upper_bound"
+      variable: "x_pressure"
+      operator: "<="
+      threshold: 5.0
+      unit: "MPa"
+      rationale: "耐圧設計上限"
+      enforcement: "pre_authorization_filter"
+      violation_action: "fatal"
+    - name: "pressure_lower_bound"
+      variable: "x_pressure"
+      operator: ">="
+      threshold: 0.1
+      unit: "MPa"
+      rationale: "圧力計下限"
+      enforcement: "pre_authorization_filter"
+      violation_action: "fatal"
+    - name: "hold_time_upper_bound"
+      variable: "x_hold_time"
+      operator: "<="
+      threshold: 180.0
+      unit: "min"
+      rationale: "シフト運用上限"
+      enforcement: "pre_authorization_filter"
+      violation_action: "fatal"
+    - name: "mass_frac_sum_dag"
+      expr: "x_mass_frac_A + x_mass_frac_B"
+      operator: "<="
+      threshold: 1.0
+      rationale: "質量分率の物理制約（DAG 由来上限、残部が原料 C）"
+      enforcement: "pre_authorization_filter"
+      violation_action: "fatal"
+    - name: "mass_frac_operational_margin"
+      expr: "x_mass_frac_A + x_mass_frac_B"
+      operator: "<="
+      threshold: 0.85
+      rationale: "原料 C が最低 15% 必要（焼結助剤としての最小添加量、Ch14 で narrow）"
+      enforcement: "pre_authorization_filter"
+      violation_action: "fatal"
+    - name: "atmosphere_whitelist"
+      variable: "x_atmosphere"
+      operator: "in"
+      threshold: ["Ar", "N2", "Air"]
+      rationale: "施設で供給可能な雰囲気ガス"
+      enforcement: "pre_authorization_filter"
+      violation_action: "fatal"
+  safety_envelope:
+    documented_in: "vol-04:appendix-c:C.12.6 gate table"
+    l3_gate_ref: "vol-04:L3_intervention_execution_authorization"
+```
+
+---
+
+## 10.7 制約破りの失敗パターン（Ch15 プレビュー）
 
 第15章で完全展開しますが、本章で扱うべき典型パターン：
 
@@ -414,7 +626,7 @@ safe_bo_config:
 
 ---
 
-## 10.6 Skill 契約チェックリスト
+## 10.8 Skill 契約チェックリスト
 
 - [ ] `constraints_declared` に hard / soft の分類が明示されている
 - [ ] 各 hard_constraint の `enforcement` が `pre_authorization_filter`
@@ -429,7 +641,7 @@ safe_bo_config:
 
 ---
 
-## 10.7 章末演習
+## 10.9 章末演習
 
 **問 1**：「温度上限 800°C、圧力上限 5 MPa、収率下限 60%」の 3 制約。それぞれ hard / soft のどちらに分類しますか？ 根拠を述べよ。
 
@@ -443,7 +655,7 @@ safe_bo_config:
 
 ---
 
-## 10.8 参考資料
+## 10.10 参考資料
 
 ### 本書内
 

@@ -56,10 +56,26 @@ $$
 
 **契約**（BO の acquisition_spec を AL 用に転用）：
 
+**canonical enum：`active_learning_acquisition_spec.name`**（vol-05 Ch13 §13.2 SoT）
+
+| Value | 戦略族 | 適用タスク | 参照節 |
+|:---|:---|:---|:---|
+| `predictive_variance` | 予測の pointwise variance が最大の点を選ぶ（回帰の epistemic uncertainty 狙い） | regression | §13.2.1 |
+| `predictive_entropy` | 予測分布の entropy が最大の点を選ぶ（分類の総 uncertainty） | classification | §13.2.1 |
+| `query_by_committee` | 複数モデル（committee）の予測が食い違う点を選ぶ（vote entropy / KL 等） | regression / classification | §13.2.2 |
+| `expected_model_change` | 候補点を追加した際のモデルパラメタ変化の期待値を評価 | regression / classification | §13.2.3 |
+| `mutual_information_bald` | パラメタ θ と予測 y の相互情報量（total entropy − E[aleatoric entropy]、epistemic のみ） | classification（主） / regression（副） | §13.2.3 |
+| `integrated_variance_reduction` | 候補点追加による領域全体の variance 積分減少を評価（global uncertainty reduction） | regression | §13.2.4 |
+
+> [!NOTE]
+> - **制約付き**バリアントは canonical name + `_constrained` suffix（例：`predictive_variance_constrained`）
+> - **cost-aware** バリアントは canonical name + `_cost_aware` suffix（例：`mutual_information_bald_cost_aware`）
+> - 実装で使う場合は、上記 canonical name を必ずそのまま用いること（表記ゆれ禁止）。エイリアス（例：`BALD` / `MI-BALD`）は display 用としてのみ許可、machine-readable YAML では canonical name を用いる
+
 ```yaml
 active_learning_acquisition_spec:
   version: "v0.2"
-  name: "predictive_variance"                 # enum (strategy family): predictive_variance | predictive_entropy | query_by_committee | expected_model_change | mutual_information_bald | integrated_variance_reduction
+  name: "predictive_variance"                 # enum: §13.2 canonical table 参照
   # 補足：predictive_variance は回帰の pointwise variance、predictive_entropy は分類の entropy、
   # mutual_information_bald は total entropy - E[aleatoric entropy] で epistemic uncertainty を狙う。
   # integrated_variance_reduction は候補点追加による領域全体の variance 積分減少を評価

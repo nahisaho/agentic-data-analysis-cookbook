@@ -509,6 +509,189 @@ def test_c5_optimum_recovery(tolerance: float = 0.05):
 
 ---
 
+## C.12 `causal_dag_ceramic_v1` — セラミック焼成合成用 DAG（vol-05 Ch14 capstone 用参照 SoT）
+
+> [!NOTE]
+> **本節の位置付け**：vol-05 第14章（capstone worked example）は、セラミック焼成合成の Bayesian Optimization を扱うが、
+> その search space の因果的正当化は本節の DAG（`causal_dag_ceramic_v1`）に完全に依存する。
+> vol-05 Ch14 §14.2.1 の `derived_from: "vol-04:appendix-c:causal_dag_ceramic_v1"` および
+> `dag_of_record_uri: "vol-04:appendix-c:causal_dag_ceramic_v1"` は本節を SoT として参照する。
+> 本 DAG は vol-04 §4.6.2 L1 (`dag_authorization`) の対象 artifact であり、`facility_scope_escalation.applies_to`
+> の `dag_of_record_promotion_to_facility_standard` により L4 昇格の候補となる。
+
+### C.12.1 スコープと版管理
+
+- **version**: `v1`
+- **domain**: セラミック焼成合成（緻密化・機械特性最適化）
+- **status**: `facility_reference_dag`（vol-04 §4.6.2 L1 承認済み DAG artifact として登録可）
+- **canonical_id**: `vol-04:appendix-c:causal_dag_ceramic_v1`
+- **artifact 化規約**：
+  - この DAG を Skill/Run で参照する際は、canonical serialize（DAG を JSON 化 → RFC 8785 JCS、sorted keys、UTF-8、no trailing newline）した内容の SHA256 を `dag_of_record_sha256` として artifact に pin する
+  - 計算方法： `sha256(json.dumps(dag_canonical, sort_keys=True, separators=(',', ':')).encode('utf-8'))`
+  - `dag_of_record_uri` は本 canonical_id を使用
+- **immutability**: `immutable_within_run`（vol-05 Ch14 §14.2.1 `dag_revision_policy`）
+
+### C.12.2 変数定義（入力・中間・出力）
+
+**入力変数（介入可能な設計変数）**：
+
+| 変数 | 型 | 範囲 / 選択肢 | 単位 | 説明 |
+|:---|:---|:---|:---|:---|
+| `x_temperature` | continuous | 200 – 800 | °C | 焼成温度（装置耐熱上限で 800 に制約） |
+| `x_pressure` | continuous | 0.1 – 5.0 | MPa | 加圧焼結圧力 |
+| `x_hold_time` | continuous | 30 – 180 | min | 保持時間 |
+| `x_mass_frac_A` | continuous | 0.1 – 0.6 | – | 原料 A の質量分率 |
+| `x_mass_frac_B` | continuous | 0.1 – 0.6 | – | 原料 B の質量分率（残部が原料 C。ただし線形制約 `x_mass_frac_A + x_mass_frac_B ≤ 1.0`。vol-05 Ch14 §14.2.1 では応用側の安全マージンで 0.85 に絞込） |
+| `x_atmosphere` | categorical | `Ar` \| `N2` \| `Air` | – | 焼結雰囲気 |
+| `x_precursor_grade` | categorical | `batch` \| `reagent` | – | 前駆体グレード（batch = 工業品、reagent = 試薬級） |
+
+**中間変数（潜在物性、直接介入不可）**：
+
+| 変数 | 型 | 説明 |
+|:---|:---|:---|
+| `crystallinity` | continuous [0,1] | 結晶化度 |
+| `phase_fraction` | continuous [0,1] × K | 目的相の相分率（K = 主相・副相・不純相） |
+| `grain_size` | continuous | 平均粒径（μm） |
+
+**出力変数（測定 outcome、Ch14 の目的）**：
+
+| 変数 | 型 | 単位 | 目的方向 |
+|:---|:---|:---|:---|
+| `Y_hardness_GPa` | continuous | GPa | maximize |
+| `Y_toughness_MPa_root_m` | continuous | MPa·m^(1/2) | maximize |
+
+> [!IMPORTANT]
+> vol-05 Ch14 §14.2 では 14a シナリオで `y_hardness` のみ、14b で `y_hardness` + `y_density` を扱う。
+> 本 DAG は硬度・靱性を canonical 出力とし、密度 `y_density` は施設側の派生 outcome（`grain_size` と単調関係）として
+> Ch14 内で個別宣言する。異なる目的関数を追加する run は本 DAG の revision（新 SHA256）が必要。
+
+### C.12.3 因果エッジ（DAG）
+
+```mermaid
+flowchart LR
+    T[x_temperature] --> C[crystallinity]
+    P[x_pressure] --> C
+    A[x_atmosphere] --> C
+    MA[x_mass_frac_A] --> PF[phase_fraction]
+    MB[x_mass_frac_B] --> PF
+    PG[x_precursor_grade] --> PF
+    H[x_hold_time] --> GS[grain_size]
+    T --> GS
+    C --> YH[Y_hardness_GPa]
+    C --> YT[Y_toughness_MPa_root_m]
+    PF --> YH
+    PF --> YT
+    GS --> YH
+    GS --> YT
+```
+
+**エッジ集合（canonical）**：
+
+```yaml
+edges:
+  # (x_temperature, x_pressure, x_atmosphere) -> crystallinity
+  - {from: x_temperature,   to: crystallinity,    mechanism: "thermodynamic_driving_force"}
+  - {from: x_pressure,      to: crystallinity,    mechanism: "densification_kinetics"}
+  - {from: x_atmosphere,    to: crystallinity,    mechanism: "redox_pathway"}
+  # (x_mass_frac_A, x_mass_frac_B, x_precursor_grade) -> phase_fraction
+  - {from: x_mass_frac_A,   to: phase_fraction,   mechanism: "stoichiometry"}
+  - {from: x_mass_frac_B,   to: phase_fraction,   mechanism: "stoichiometry"}
+  - {from: x_precursor_grade, to: phase_fraction, mechanism: "impurity_seeding"}
+  # (x_hold_time, x_temperature) -> grain_size
+  - {from: x_hold_time,     to: grain_size,       mechanism: "grain_growth_kinetics"}
+  - {from: x_temperature,   to: grain_size,       mechanism: "grain_growth_kinetics"}
+  # latent -> outcomes
+  - {from: crystallinity,   to: Y_hardness_GPa,          mechanism: "load_bearing_lattice"}
+  - {from: crystallinity,   to: Y_toughness_MPa_root_m,  mechanism: "load_bearing_lattice"}
+  - {from: phase_fraction,  to: Y_hardness_GPa,          mechanism: "mixture_rule"}
+  - {from: phase_fraction,  to: Y_toughness_MPa_root_m,  mechanism: "mixture_rule"}
+  - {from: grain_size,      to: Y_hardness_GPa,          mechanism: "hall_petch"}
+  - {from: grain_size,      to: Y_toughness_MPa_root_m,  mechanism: "hall_petch"}
+```
+
+**mediator / confounder 構造**：
+
+- `crystallinity` は `(x_temperature, x_pressure, x_atmosphere) → outcome` の **mediator**
+- `phase_fraction` は `(x_mass_frac_A, x_mass_frac_B, x_precursor_grade) → outcome` の **mediator**
+- `grain_size` は `(x_hold_time, x_temperature) → outcome` の **mediator**
+- `x_temperature` は `grain_size` と `crystallinity` の両方に作用（**間接パス複数**）
+- **観測不能 confounder**は本 v1 では宣言なし。追加する場合は本 DAG の revision（新 version）を要する
+
+### C.12.4 canonical artifact エンコード（DAG-of-record 参照用）
+
+```yaml
+causal_dag_ceramic_v1:
+  version: "v1"
+  canonical_id: "vol-04:appendix-c:causal_dag_ceramic_v1"
+  nodes:
+    inputs:
+      - {name: x_temperature,    type: continuous,  low: 200.0, high: 800.0, unit: "degC"}
+      - {name: x_pressure,       type: continuous,  low: 0.1,   high: 5.0,   unit: "MPa"}
+      - {name: x_hold_time,      type: continuous,  low: 30.0,  high: 180.0, unit: "min"}
+      - {name: x_mass_frac_A,    type: continuous,  low: 0.1,   high: 0.6,   unit: "1"}
+      - {name: x_mass_frac_B,    type: continuous,  low: 0.1,   high: 0.6,   unit: "1"}
+      - {name: x_atmosphere,     type: categorical, choices: ["Ar", "N2", "Air"]}
+      - {name: x_precursor_grade, type: categorical, choices: ["batch", "reagent"]}
+    latents:
+      - {name: crystallinity,    type: continuous, low: 0.0, high: 1.0}
+      - {name: phase_fraction,   type: continuous, low: 0.0, high: 1.0}
+      - {name: grain_size,       type: continuous, low: 0.05, high: 50.0, unit: "um"}
+    outcomes:
+      - {name: Y_hardness_GPa,          type: continuous, unit: "GPa",       direction: maximize}
+      - {name: Y_toughness_MPa_root_m,  type: continuous, unit: "MPa*m^0.5", direction: maximize}
+  edges:
+    - {from: x_temperature,    to: crystallinity}
+    - {from: x_pressure,       to: crystallinity}
+    - {from: x_atmosphere,     to: crystallinity}
+    - {from: x_mass_frac_A,    to: phase_fraction}
+    - {from: x_mass_frac_B,    to: phase_fraction}
+    - {from: x_precursor_grade, to: phase_fraction}
+    - {from: x_hold_time,      to: grain_size}
+    - {from: x_temperature,    to: grain_size}
+    - {from: crystallinity,    to: Y_hardness_GPa}
+    - {from: crystallinity,    to: Y_toughness_MPa_root_m}
+    - {from: phase_fraction,   to: Y_hardness_GPa}
+    - {from: phase_fraction,   to: Y_toughness_MPa_root_m}
+    - {from: grain_size,       to: Y_hardness_GPa}
+    - {from: grain_size,       to: Y_toughness_MPa_root_m}
+  linear_constraints:
+    - {name: mass_frac_sum, expr: "x_mass_frac_A + x_mass_frac_B", operator: "<=", threshold: 1.0}
+  identifiability:
+    strategy: "front_door_via_mediators"          # crystallinity / phase_fraction / grain_size を経由
+    unmeasured_confounders_declared: []            # v1 では宣言なし（施設内で管理下と仮定）
+  dag_of_record_sha256_computation:
+    canonical_serialization: "RFC_8785_JCS"
+    encoding: "UTF-8"
+    sort_keys: true
+    no_trailing_newline: true
+    python_snippet: |
+      import json, hashlib
+      payload = <this yaml block deserialized to dict>
+      canonical = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode('utf-8')
+      dag_of_record_sha256 = "sha256:" + hashlib.sha256(canonical).hexdigest()
+```
+
+### C.12.5 vol-05 Ch14 との連携
+
+vol-05 Ch14 における参照ポイント：
+
+- **Ch14 §14.2.1 Phase 1**：本 DAG を `derived_from` / `dag_of_record_uri` に pin。`dag_of_record_sha256` を artifact 上で計算・記録
+- **Ch14 §14.2.1 Phase 1 の search space narrowing**：本 DAG の `x_temperature` 範囲 200–800 を継承（vol-05 は元々 200–900 と宣言していたが装置耐熱上限 800 で narrow）
+- **Ch14 §14.2.1 linear_constraints**：`x_mass_frac_A + x_mass_frac_B ≤ 0.85` として vol-05 で narrow（本 DAG は上限 1.0 を許容、Ch14 の運用マージンで 0.85）
+- **Ch14 §14.2.2 mixed_kernel の categorical 部分**：`x_atmosphere`（および必要時 `x_precursor_grade`）に Hamming kernel を適用
+- **Ch14 dag_revision_policy**：本 DAG の SHA256 mismatch は `fatal_new_run_required`
+
+### C.12.6 vol-04 章末 gate との対応
+
+| gate | 対象 | 承認者 |
+|:---|:---|:---|
+| L1 `dag_authorization` | 本 DAG の変更（version bump / edge 追加削除 / variable 変更） | research_lead（PI-scope）、施設標準化時は `facility_causal_review_board` |
+| L2 `variable_selection_authorization` | confounder / mediator / collider 判定の変更、adjustment set の変更 | research_lead |
+| L3 `intervention_execution_authorization` | 本 DAG 上での実験実行 | pi_and_facility_manager |
+| L4 `facility_standard_promotion` | 本 DAG の施設標準化（`facility_scope_escalation.applies_to.dag_of_record_promotion_to_facility_standard`） | `facility_causal_review_board` + `audit_manifest_v1_pass` 前提 |
+
+---
+
 ## 章末チェックリスト
 
 - [ ] C-1〜C-6 の合成データ生成スクリプトは seed=42 で byte-exact に再現可能

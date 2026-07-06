@@ -148,7 +148,7 @@ pareto_convergence_diagnostic:
 
 **症状**：safe BO の feasibility model が overconfident で、真の制約違反領域を「安全」と誤判定（`predicted_feasibility_prob` が高いのに empirical rate が低い）。
 
-**診断契約**（Ch10 §10.6 準拠）：
+**診断契約**（Ch10 §10.8 準拠）：
 
 ```yaml
 safe_bo_calibration_check:

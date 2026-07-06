@@ -601,7 +601,7 @@ skill:
     - instrument_id
     - operator_id
 
-  # === ②' データ来歴 ===
+  # === ②' provenance ===
   data_lineage:
     dataset_uri: <string>
     dataset_sha256: <string>

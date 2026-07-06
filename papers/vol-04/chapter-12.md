@@ -559,7 +559,7 @@ skill:
     - instrument_id
     - operator_id
 
-  # === ②' データ来歴 ===
+  # === ②' provenance ===
   data_lineage:
     prior_dataset_uri: <string>                     # 事前分布を作るのに使った過去バッチ
     prior_dataset_sha256: <string>

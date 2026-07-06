@@ -81,6 +81,13 @@ vol-02 の `artifacts/` / `diagnostics/` に加え、深層学習の中間物と
 > [!TIP]
 > `checkpoints/` は **append-only**（Ch4 `checkpoint_overwrite_policy: append_only`）が原則。「best」は上書きファイル（`best.safetensors`）ではなく**不変な checkpoint への署名付きポインタ**として `checkpoint_registry.jsonl` に記録する（例：`{"best_of_run_<id>": "epoch_042.safetensors", "signed_by": "..."}`）。ディスク節約が必要な場合でも最終 signed checkpoint と best pointer 対象の実体は残し、中間削除は `checkpoint_registry.jsonl` に append で記録する。**silent な上書きは AG-03（第15章）に該当**。
 
+> [!NOTE]
+> **parity note (v0.2, optional)**：`checkpoint_registry.jsonl` の各エントリに **optional** な `previous_event_hash` フィールドを追加できる（vol-05 Ch10 §10.5 `event_canonical_serialization` schema と parity）。付与時は前 event の `event_hash` を参照する canonical チェーンを構築し、per-event の tamper detection が可能になる。既存 registry（v0.1）は file-level `checkpoint_overwrite_policy: append_only` のみで integrity を担保しており、v0.2 は additive な optional 拡張。例：
+> ```json
+> {"epoch": 42, "path": "epoch_042.safetensors", "sha256": "...", "created_at": "...", "event_hash": "sha256:...", "previous_event_hash": "sha256:..."}
+> ```
+> チェーン検証は vol-05 Ch10 §10.5.2 の `verify_chain` を再利用可能。
+
 ### A.1.2 テンプレの読み方
 
 各テンプレは以下 3 セクションで構成：
@@ -173,6 +180,16 @@ agent_authorization:                         # Ch4 canonical
     approval_record_id: "sha256"
     approver_role: "ml_lead | pi"
     approver_is_non_agent: true
+    # --- Design note (v0.2): parent_authorization_id は意図的に置かない（self-contained gate） ---
+    # training_job_approval は vol-01 Ch6 baseline HITL や vol-04 L3 の子ではなく、
+    # ML lead / PI が完結して承認する self-contained gate として設計されている。
+    # vol-05 §5.3 experiment_launch_authorization が vol-04 L3 を parent として要するのは、
+    # 「物理実験実行」が facility の物理リスクを伴うためであり、training job は数値環境内で
+    # revocable（checkpoint_overwrite_policy: append_only により roll-back 可能）。
+    # したがって parent_authorization_id は不要。ただし将来的に vol-04 L1/L2 相当の
+    # 施設 governance に組み込む場合は、optional parent_authorization_id フィールドを
+    # 追加する v0.3 拡張を検討する。
+    parent_authorization_id: null              # v0.2: 意図的に self-contained（design note 参照）
   checkpoint_overwrite_policy: "append_only" # Ch4 canonical enum
   fm_update_gate_required_if_using_fm: true  # Ch11
   uncertainty_stop_threshold_ref: "Ch8 skill"

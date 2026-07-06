@@ -54,7 +54,8 @@ GP は次の 3 要素で完全に規定されます：
 
 ```yaml
 # --- 既存フィールド: surrogate_model_family（第5章 §5.2 Group A）---
-surrogate_model_family: "single_task_gp"  # enum: single_task_gp | fixed_noise_gp | heteroskedastic_gp
+# Ch5 §5.2.X canonical enum のうち Ch6 で扱うのは以下 3 種類（他値は Ch8 / Ch11 で扱う）
+surrogate_model_family: "single_task_gp"  # enum (Ch6 subset): single_task_gp | fixed_noise_gp | heteroskedastic_gp
 
 # --- 既存フィールド: kernel_spec（第5章 §5.2 Group A）の詳細内部構造 ---
 kernel_spec:

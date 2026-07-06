@@ -48,12 +48,13 @@ vol-05 の BO Skill は **「観測後に次を決める」**——iteration ご
 | `search_space_bounds` | dict | 連続変数の (low, high) + 離散変数の候補集合 + 単位 | 5 |
 | `bo_library_stack` | enum | `botorch_direct` / `ax_botorch` / `skopt_ask_tell` / `hebo` / `emukit` / `modal_al` / `custom` | 4, 5 |
 | `bo_library_stack_metadata` | dict | `library_version` / `model_backend` / `acquisition_impl` / `generation_strategy_uri`（Ax のみ）| 4, 5 |
-| `surrogate_model_family` | enum | `single_task_gp` / `multi_task_gp` / `random_forest` / `bnn` / `deep_kernel` | 5 |
+| `surrogate_model_family` | enum | canonical enum は §5.2.X 参照（`single_task_gp` / `fixed_noise_gp` / `heteroskedastic_gp` / `multi_task_gp` / `hierarchical_gp` / `random_forest` / `bayesian_neural_network` / `deep_kernel_learning`）| 5 |
 | `kernel_spec` | dict | kernel 型（Matérn 5/2 / RBF / Hamming / product / hierarchical）+ length_scale prior | 6 |
-| `acquisition_spec` | dict | acquisition 名（qLogEI / qUCB / qKG / qMES / qEHVI / cEI / SafeOpt 等）+ hyperparameter | 7 |
+| `acquisition_spec` | dict | acquisition 名（canonical enum は §5.2.X 参照：`qLogEI` / `qLogNEI` / `qUCB` / `qKG` / `qMES` / `qLogEHVI` / `qLogNEHVI` / `qParEGO` 等）+ hyperparameter | 7 |
 | `surrogate_treatment_of_facility_variance` | enum | `categorical_input` / `hierarchical_shrinkage` / `blocked_out` / `not_applicable` | 3, 5 |
 | `retraining_policy` | enum | `every_iteration` / `every_n_iterations` / `threshold_triggered` | 5 |
 | `sequential_seed_provenance` | dict | 逐次乱数 seed の由来（初期 seed、iteration ごとの派生規則）| 5, 15 |
+| `tensor_encoding_contract` | dict/ref | 連続 / categorical / facility_id の tensor encoding 規約（Ch12 §12.x SoT）| 11, 12, 14, 15 |
 
 **pin される理由**：これらが iteration 間で勝手に変わると、**BO の性能保証（regret bound）が破れる**、**provenance から再現できなくなる**、または **第3章 §3.5 の逸脱**が発生します。
 
@@ -102,6 +103,79 @@ vol-05 の BO Skill は **「観測後に次を決める」**——iteration ご
 > [!NOTE]
 > **「15 前後」から「Core 18 + 拡張 3」への拡張**：v0.1 では 15 フィールドで書きましたが、rubber-duck review で `sequential_seed_provenance`、`batch_size`、`bo_library_stack_metadata` の重要性が指摘され、21 フィールドの正式仕様としました。§5.8 使用マップも 21 フィールドで再構成しています。
 
+### 5.2.X canonical enum tables（章横断 SoT）
+
+> [!IMPORTANT]
+> 本節は **vol-05 全体で共通利用する canonical enum の SoT** である。他章（Ch6-Ch15）はこの表を継承し、独自の enum 値を追加する場合は本節への back-registration を required とする。
+
+**canonical enum：`surrogate_model_family`**
+
+| Value | 説明 | 主に扱う章 |
+|:---|:---|:---|
+| `single_task_gp` | 単一タスク GP（標準） | Ch5, Ch6, Ch8 |
+| `fixed_noise_gp` | 既知ノイズ分散 GP | Ch6, Ch14 |
+| `heteroskedastic_gp` | ノイズ分散が入力依存 | Ch6 |
+| `multi_task_gp` | 複数タスク（装置・材料系）で情報共有 | Ch11 |
+| `hierarchical_gp` | 階層 prior による装置間 shrinkage | Ch8, Ch11 |
+| `random_forest` | 非パラメトリックな回帰森（categorical 混在時） | Ch5, Ch8 |
+| `bayesian_neural_network` | ベイズニューラル（大規模データ・深い non-linearity） | Ch5, Ch8 |
+| `deep_kernel_learning` | Deep Kernel（表現学習 + GP） | Ch5, Ch8 |
+
+**canonical enum：`acquisition_spec.name`（single-objective）**
+
+| Value | 名称 | 章 |
+|:---|:---|:---|
+| `qLogEI` | q-batch Log Expected Improvement | Ch5, Ch7 |
+| `qLogNEI` | q-batch Log Noisy EI | Ch7, Ch10, Ch12, Ch14 |
+| `qUCB` | q-batch Upper Confidence Bound | Ch7 |
+| `qPI` | q-batch Probability of Improvement | Ch7 |
+| `qKG` | q-batch Knowledge Gradient | Ch7 |
+| `qMES` | q-batch Max-value Entropy Search | Ch7 |
+| `qTS` | q-batch Thompson Sampling | Ch7, Ch12 |
+| `qPES` | q-batch Predictive Entropy Search | Ch7 |
+
+**canonical enum：`acquisition_spec.name`（multi-objective）**
+
+| Value | 名称 | 章 |
+|:---|:---|:---|
+| `qLogEHVI` | q-batch Log Expected Hypervolume Improvement | Ch9, Ch14 |
+| `qLogNEHVI` | q-batch Log Noisy EHVI | Ch9, Ch10, Ch14 |
+
+**canonical enum：`acquisition_spec.name`（multi-objective via scalarization）**
+
+| Value | 名称 | 章 |
+|:---|:---|:---|
+| `qParEGO` | q-batch Pareto EGO (Chebyshev scalarization) | Ch9 |
+| `qNParEGO` | q-batch Noisy ParEGO | Ch9 |
+
+> [!NOTE]
+> - 制約付き acquisition は上記 canonical name + `constraints` suffix で表す：`qLogNEI + constraints` / `qLogNEHVI + constraints`（Ch10 §10.3 で運用契約）
+> - 旧表記 `qLogExpectedImprovement` は非 canonical（本節で `qLogEI` に統一）。他章で見つけたら本節の canonical 短縮形に修正する
+> - chapter-outline の短縮形（`EI / UCB / PI / KG / MES`）は display 用。machine-readable な YAML では常に本節 canonical（`qLogEI` / `qUCB` 等）を用いる
+
+---
+
+### 5.2.Y canonical string formats（identity / approval / authorization）
+
+> [!NOTE]
+> vol-05 の provenance / authorization スキーマで用いる **文字列 ID / 承認ラベル** の canonical フォーマットを本節に集約する。vol-03 / vol-04 の canonical identity schema（vol-04 Ch4 §4.6.2、`^human:` prefix + `authorization_id` + `status` enum）と互換性を保つ。
+
+| 概念 | canonical format | 例 | 備考 |
+|:---|:---|:---|:---|
+| **identity（作業者）** | `^human:<staff_id>` | `human:staff_id_A12` | v0.2 の必須プレフィックス。Skill 実行主体は `^skill:` を用いる（fatal な writer違反検出用） |
+| **authorization_id** | `l3_auth_YYYYMMDD_HHMMSS_iter<n>` (vol-04) / `exp_launch_YYYYMMDD_HHMMSS_iter<n>` (vol-05) | `exp_launch_20260315_143022_iter5` | vol-04 §4.6.2 / vol-05 §5.3 と互換 |
+| **status enum** | `pending \| approved \| denied \| revoked` | `approved` | 4 volumes 全体で統一 |
+| **approval label（display 用）** | `approval:HITL-YYYYMMDD-XX` | `approval:HITL-20260315-05` | UI・議事録・ダッシュボード表示用の**人間可読ラベル**。machine-readable フィールドは `authorization_id` を用いる |
+| **skill identity** | `^skill:<skill_name>/<version>` | `skill:bo_recommender/v0.2` | Skill 実行主体の writer identity |
+
+**recommended pattern（推奨）**：
+
+- **machine-readable な `authorization_id` を必須**とし、`approval:HITL-YYYYMMDD-XX` は display alias として使う場合は `display_label` 別フィールドに格納
+- v0.1 で `approval:HITL-YYYYMMDD-XX` を identity として使っていた provenance は v0.2 移行時に `authorization_id` + `approver_id: ^human:<staff_id>` の 2 フィールドへ分解して migrate する（詳細は Ch12 migration note）
+- 新規実装は最初から `^human:` prefix + `authorization_id` を用いる（`approval:HITL-*` 単独は非推奨）
+
+---
+
 ### provenance の例（YAML）
 
 ```yaml
@@ -129,7 +203,7 @@ bo_skill_provenance:
     categorical: { type: "hamming" }
     composite:   "product"
   acquisition_spec:
-    name: "qLogExpectedImprovement"
+    name: "qLogEI"
     hyperparameters: { num_restarts: 10, raw_samples: 128 }
   surrogate_treatment_of_facility_variance: "categorical_input"
   retraining_policy: "every_iteration"
@@ -285,6 +359,96 @@ experiment_launch_authorization:
 | **vol-05 `experiment_launch_authorization`** | BO 特有の運用条件（hallucination なし、pending 状態一貫、budget 内、safe BO の場合は制約 pass） | **operational validity**——BO ループとして機能する条件 |
 
 **二重ゲートの必然性**：causal validity が pass しても hallucination の可能性はあり、operational validity のみでは causal 妥当性が守られない——両者は独立で、両方の pass が必要です。
+
+<a id="authorization_events_stream"></a>
+
+### 承認 event stream への back-registration（Ch15 audit 対応）
+
+Ch15 §15.3 audit 契約は、`experiment_launch_authorization` 個別 dict のみでなく **event stream 形式** で追跡することを要求する。本節で 2 種類の canonical event stream を back-register する。
+
+**`authorization_events_stream`**（Ch10 §10.5 `event_hash schema` 準拠、append-only）：
+
+各 `experiment_launch_authorization` の状態遷移（`pending → approved / denied / revoked`）を event として append する。
+
+```yaml
+authorization_events_stream:                    # append-only, Ch10 §10.5 event_hash schema
+  - event_id: "evt-auth-20261115-093015"
+    event_hash: "sha256:aa..."
+    previous_event_hash: null                    # 該当 authorization の genesis event
+    run_id: "run-2026-1115-A01"
+    skill_execution_id: "skill-exec-20261115-093015"
+    created_at: "2026-11-15T09:30:15Z"
+    created_by: "human:staff_id_XXXX"           # writer_identity_restriction ^human:
+    payload:
+      authorization_id: "elauth_20261115_093015_iter3"
+      transition:
+        from: null                                # genesis: null → pending
+        to: "pending"
+      requested_by: "skill:bo_orchestrator"
+      candidate_hash: "sha256:9f2a...c7b3"
+      iteration_index: 3
+  - event_id: "evt-auth-20261115-101247"
+    event_hash: "sha256:bb..."
+    previous_event_hash: "sha256:aa..."
+    run_id: "run-2026-1115-A01"
+    skill_execution_id: "skill-exec-20261115-093015"
+    created_at: "2026-11-15T10:12:47Z"
+    created_by: "human:staff_id_XXXX"
+    payload:
+      authorization_id: "elauth_20261115_093015_iter3"
+      transition:
+        from: "pending"
+        to: "approved"
+      approval_scope:
+        iteration_index: 3
+        candidate_hash: "sha256:9f2a...c7b3"
+        max_experiments_authorized: 1
+      parent_authorization_id: "vol-04:L3_intervention_execution_authorization:l3_auth_20261115_101200_iter3"
+      parent_l3_status: "approved"
+```
+
+**canonical rules**：
+
+- state enum: `pending | approved | denied | revoked`（vol-04 §4.6.2 と共通）
+- writer identity: `^human:`（HITL 承認は human が writer；Skill が state を書換えるのは fatal）
+- append-only、`event_hash` chain 不整合は fatal
+- 各 `authorization_id` について、genesis event の `previous_event_hash` は `null`、以降は直前 event の `event_hash` を参照
+
+<a id="experiment_launch_authorization_log"></a>
+
+**`experiment_launch_authorization_log`**（audit trail、Ch10 §10.5 event_hash schema 準拠）：
+
+Skill による launch 実行の **全 attempt** を event として append。承認済みでも失敗した attempt、pre-check reject など全記録：
+
+```yaml
+experiment_launch_authorization_log:            # append-only, Ch10 §10.5 event_hash schema
+  - event_id: "evt-launch-20261116-090015-01"
+    event_hash: "sha256:cc..."
+    previous_event_hash: "sha256:bb..."
+    run_id: "run-2026-1115-A01"
+    skill_execution_id: "skill-exec-20261116-090000"
+    created_at: "2026-11-16T09:00:15Z"
+    created_by: "skill:bo_orchestrator"
+    payload:
+      authorization_id: "elauth_20261115_093015_iter3"
+      attempt_result: "launched"                # enum: success | rejected_by_precondition_check | launched | rejected_l3_missing | rejected_scope_mismatch
+      candidate_hash: "sha256:9f2a...c7b3"
+      device_reservation_id: "resv_dev_C_20261116_090000"
+      constraint_precheck_pass: true
+      hallucination_flag: false
+      pre_conditions_verified:
+        parent_l3_status: "approved"
+        authorization_status: "approved"
+        approval_scope.candidate_hash_match: true
+        approval_scope.iteration_match: true
+```
+
+**canonical rules**：
+
+- `attempt_result` enum: `success | rejected_by_precondition_check | launched | rejected_l3_missing | rejected_scope_mismatch`
+- writer identity: `^skill:`（Skill が launch attempt log を書く）
+- append-only、event_hash chain 不整合は fatal
+- Ch15 §15.3 audit は本 log の全 event を replay して `authorization_id.status=approved` かつ `parent_l3_status=approved` かつ `candidate_hash 一致` を機械検証する
 
 ---
 

@@ -39,7 +39,7 @@
   - **vol-02 完読推奨**: 第11-13章 PyMC / MCMC、**第12章の階層モデル**（マルチタスク BO で階層事前分布を使う）
   - **vol-04 強く推奨**: 第11-13章の DoE 章、第5章の介入承認ゲート、第14章の capstone（因果 → DoE のフロー）
   - **vol-03 推奨**（必須ではない）: 第12章の Foundation Model 特徴（BO の入力表現に使う発展）
-  - vol-05 の provenance は vol-04 拡張に、**BO × 逐次 × Agentic 特有フィールド**を追加：`surrogate_model_family`（GP / Random Forest / BNN）, `kernel_spec`, `acquisition_function`（EI / UCB / PI / KG / MES）, `iteration_index`, `batch_size`, `search_space_bounds`, `constraints_declared`, `pending_experiments`, `budget_remaining`, `stop_condition`（budget / convergence / regret threshold）, **`experiment_launch_authorization`**, **`hallucinated_recommendation_detection`**（surrogate の外挿誤用検知）, **`sequential_seed_provenance`**（seed の上書き禁止契約）
+  - vol-05 の provenance は vol-04 拡張に、**BO × 逐次 × Agentic 特有フィールド**を追加：`surrogate_model_family`（GP / Random Forest / BNN）, `kernel_spec`, `acquisition_function`（EI / UCB / PI / KG / MES）, `iteration_index`, `batch_size`, `search_space_bounds`, `constraints_declared`, `pending_experiments`, `budget_remaining`, `stop_condition`（budget / convergence / regret threshold）, **`experiment_launch_authorization`**, **`hallucinated_recommendation_detection`**（surrogate の外挿誤用検知）, **`sequential_seed_provenance`**（seed の上書き禁止契約）。全体は **21 fields（Core 18 + 拡張 3：`bo_library_stack_metadata` / `sequential_seed_provenance` / `batch_size`）**、SoT は Ch5 §5.2
 - **最終ゴール（合格ライン）**:
   - **Pillar 1**: **単目的 BO Skill**（GP surrogate + EI/UCB）を 1 つ以上作れる。**「エージェントが次の 1 点を提案 → Human 承認 → データ取込 → 次の提案」ループが provenance に完全記録される**
   - **Pillar 2**: **多目的 BO / 多制約 BO Skill**（qEHVI, cEI, safe BO のいずれか）を 1 つ以上作れる。**Pareto front の外挿範囲がエージェントに管理されている**

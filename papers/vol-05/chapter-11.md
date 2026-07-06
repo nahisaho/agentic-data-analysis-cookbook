@@ -48,11 +48,17 @@ k_{\text{MTGP}}\bigl((x, i), (x', j)\bigr) = k_{\text{input}}(x, x') \cdot B_{ij
 $$
 
 - $k_{\text{input}}$：入力 $x$ に関する共通 kernel（Matérn 5/2 など）
-- $B$：**task-task correlation matrix** $M \times M$、学習可能パラメータ（正定値）
+- $B$：**task 共分散行列 (task covariance / coregionalization matrix)**、$M \times M$ 正定値。BoTorch では **low-rank + 対角** に分解（`rank` パラメータ）
 - $i, j$：task index（`facility_id`）
 
-**強み**：装置間相関 $B_{ij}$ を明示的に学習、対称的な情報共有
-**弱み**：$B$ の学習は task 数 $M$ が大きいと不安定、階層構造を強制できない
+**正規化 task 相関** $\tilde B_{ij} = B_{ij} / \sqrt{B_{ii} B_{jj}}$ は解釈用に別途記録するのが実務的：
+
+- $\tilde B \to \mathbf{1}\mathbf{1}^\top$（全成分 1）：**装置差が学習されていない**（＝全装置完全相関、装置差無視の失敗モード）
+- $\tilde B \to I$（単位行列）：**装置間 independent**（partial pooling が効いていない、cold start に戻っている）
+- 中間：適切な partial pooling が効いている
+
+**強み**：装置間関係 $B$ を明示的に学習、対称的な情報共有
+**弱み**：$B$ の学習は task 数 $M$ が大きいと不安定、明示的な階層構造は表現しにくい
 
 ### 11.2.2 Hierarchical GP
 
@@ -93,32 +99,33 @@ $$
 
 ### 11.3.1 Multi-task GP
 
+> [!NOTE]
+> 本章は第6章 `kernel_spec` の内部拡張です。Ch6 の `continuous` サブフィールドを **`input_kernel`** に、追加で **`task_kernel`** を新設します。prior 表記は Ch6 の `distribution` / `params` 形式に揃えます。
+
 ```yaml
 surrogate_model_family: "multi_task_gp"        # canonical enum
 
 kernel_spec:
   input_kernel:
-    type: "matern_5_2"
+    type: "matern52"                           # Ch6 と同じ enum 記法
     ard: true
     length_scale_prior:
-      type: "gamma"
-      concentration: 3.0
-      rate: 6.0
+      distribution: "gamma"
+      params: {concentration: 3.0, rate: 6.0}
   task_kernel:
     type: "icm"                                # enum: icm | lcm
     num_tasks: 3                               # facility_id 数
-    rank: 2                                    # low-rank approximation、rank<=num_tasks
-    task_correlation_prior:
-      type: "lkj"
-      shape: 2.0
+    rank: 2                                    # low-rank 分解、1 <= rank <= num_tasks
+    task_covariance_prior:
+      distribution: "lkj"                      # 正規化相関に対する事前分布
+      params: {shape: 2.0}
   mean_function:
     type: "constant"
   likelihood:
     type: "gaussian"
     noise_prior:
-      type: "gamma"
-      concentration: 1.1
-      rate: 0.05
+      distribution: "gamma"
+      params: {concentration: 1.1, rate: 0.05}
 
 task_index_spec:
   variable: "facility_id"                      # 入力 x のうち task index を担う変数
@@ -127,39 +134,72 @@ task_index_spec:
     "facility_A": 0
     "facility_B": 1
     "facility_C": 2
+  validation_rules:
+    contiguous_indices: true                   # 0..num_tasks-1 の連続整数
+    num_tasks_equals_map_size: true
+    reject_unknown_facility_id: "requires_human_approval"  # enum: fatal | requires_human_approval
+    exclude_from_continuous_normalization: true
+    exclude_from_ard: true
   new_task_policy: "requires_human_approval"   # enum: requires_human_approval | fatal
 ```
 
+**HRD (Ch7/8) との接続**：
+
+```yaml
+hallucinated_recommendation_detection:
+  version: "v0.2"
+  # ...
+  surrogate_family_adapter: "multi_task_gp"
+  scale_source:
+    type: "gp_lengthscale"
+    source_path: "kernel_spec.input_kernel.length_scale"   # task_kernel ではない
+    exclude_variables: ["facility_id"]                     # task index は距離計算から除外
+```
+
 ### 11.3.2 Hierarchical GP
+
+**共分散の operational 定義**：
+
+$$
+\text{cov}\bigl((x, i), (x', j)\bigr) = k_{\text{global}}(x, x') + \mathbb{1}[i=j] \cdot k_{\text{dev}, i}(x, x')
+$$
+
+- global kernel は全 task で共有、observation pooling を担当
+- deviation kernel は per-task、task 固有のずれのみを吸収（block-diagonal に効く）
 
 ```yaml
 surrogate_model_family: "hierarchical_gp"
 
 kernel_spec:
   global_kernel:
-    type: "matern_5_2"
+    type: "matern52"
     ard: true
     length_scale_prior:
-      type: "gamma"
-      concentration: 3.0
-      rate: 6.0
+      distribution: "gamma"
+      params: {concentration: 3.0, rate: 6.0}
   deviation_kernel:
-    type: "matern_5_2"
+    type: "matern52"
     ard: true
     length_scale_prior:
-      type: "hierarchical_from_global"         # 上位 global length scale から派生
-      shrinkage_alpha: 0.5                     # deviation length scale の shrinkage
+      type: "hierarchical_from_global"
+      parameterization: "log_normal_partial_pooling"
+      formula: "log(ell_dev_i) ~ Normal(log(ell_global), sigma_dev)"
+      sigma_dev: 0.5                           # 装置間ばらつきの事前分布 σ
     output_scale_prior:
-      type: "half_normal"
-      scale: 0.3                               # deviation の振幅制限、事前情報
+      distribution: "half_normal"
+      params: {scale: 0.3}                     # deviation の振幅制限、事前情報
+    apply_mask: "block_diagonal_by_task"       # 実装：cov に 1[i=j] を掛ける
   mean_function:
-    type: "shared_constant"                    # 全 task 共通の constant
+    type: "shared_constant_plus_task_offset"   # enum: shared_constant | shared_constant_plus_task_offset
+    task_offset_prior:
+      distribution: "normal"
+      params: {mean: 0.0, scale: 0.3}
+      pooling: "partial"
   likelihood:
     type: "gaussian"
     noise_prior:
-      type: "gamma"
-      concentration: 1.1
-      rate: 0.05
+      distribution: "gamma"
+      params: {concentration: 1.1, rate: 0.05}
 
 task_index_spec:
   variable: "facility_id"
@@ -168,21 +208,31 @@ task_index_spec:
     "facility_A": 0
     "facility_B": 1
     "facility_C": 2
+  validation_rules:
+    contiguous_indices: true
+    num_tasks_equals_map_size: true
+    reject_unknown_facility_id: "requires_human_approval"
+    exclude_from_continuous_normalization: true
+    exclude_from_ard: true
   new_task_policy: "requires_human_approval"
 ```
 
+**HRD scale_source**：`global_kernel.length_scale` を既定に使う（partial pooling されているため deviation より stable）。deviation length scale を使うのは per-task に十分な観測がある場合のみ、Human 承認付き。
+
 ### 11.3.3 新装置の追加ポリシー
 
-**装置 D を新規追加**するとき：
+**装置 D を新規追加**するとき、`new_task_policy` に応じて以下の挙動：
 
-- `new_task_policy: "requires_human_approval"` の場合：
-  - Skill 実行中の追加は fatal（context 変更 = 新 run）
-  - 追加時は `task_map` に entry を追加、新 run で開始
-- `new_task_policy: "fatal"` の場合：
-  - 追加は許可されず、Skill が停止
+- `requires_human_approval`：
+  - Skill 実行中に未知の `facility_id` を検出 → **現 run は継続不可**、`needs_human_approval` を emit
+  - Human が承認 → `task_map` に entry 追加、**新 run** として開始（承認済み変更なので不整合ではない）
+  - **fatal との違い**：Skill に停止経路と承認経路が両方あり、Human で復帰可能
+- `fatal`：
+  - Skill 契約として承認経路を提供しない、未知 task 検出は即座に契約違反
+  - 使用場面：装置追加そのものを別プロセス（Change Advisory Board 等）に委ねる場合
 
 > [!IMPORTANT]
-> `task_map` の変更は第3章 §3.5 逸脱 3 (context 変更) と同種。Skill 自律での追加は fatal。
+> `task_map` の変更は第3章 §3.5 逸脱 3 (context 変更) と同種。Skill 自律での追加は fatal。`requires_human_approval` の場合も、承認は「新 run 開始」への同意であって「現 run 継続」ではない。
 
 ---
 
@@ -212,25 +262,33 @@ mll = ExactMarginalLogLikelihood(model.likelihood, model)
 fit_gpytorch_mll(mll)
 ```
 
+> [!NOTE]
+> `task_feature` 列は integer-coded のまま保持し、**continuous input normalization / ARD length-scale の対象から除外**する（`task_index_spec.validation_rules.exclude_from_continuous_normalization / exclude_from_ard: true` に相当）。
+
 ### 11.4.2 Hierarchical GP — GPyTorch カスタム
 
-BoTorch native では未対応、GPyTorch でカスタム構築：
+BoTorch native では未対応、GPyTorch でカスタム構築します。
+
+> [!WARNING]
+> **以下は擬似コード（non-executable skeleton）**。特に `forward` の `cov` 計算は概念のみで、そのまま実行すると deviation kernel が使われず単一 GP に退化します。実運用では `apply_mask: block_diagonal_by_task` を実装する必要があります。
 
 ```python
 import gpytorch
 import torch
 
 class HierarchicalGP(gpytorch.models.ExactGP):
+    """
+    Non-executable skeleton.
+    Actual covariance:
+        cov((x,i), (x',j)) = k_global(x, x') + 1[i==j] * k_dev_i(x, x')
+    """
     def __init__(self, train_x, train_y, likelihood, num_tasks):
         super().__init__(train_x, train_y, likelihood)
         self.num_tasks = num_tasks
-        # global mean (shared)
-        self.mean_module = gpytorch.means.ConstantMean()
-        # global kernel (shared trend)
+        self.mean_module = gpytorch.means.ConstantMean()   # + per-task offset を別途
         self.global_kernel = gpytorch.kernels.ScaleKernel(
             gpytorch.kernels.MaternKernel(nu=2.5, ard_num_dims=train_x.shape[-1] - 1)
         )
-        # deviation kernels (per task)
         self.deviation_kernels = torch.nn.ModuleList([
             gpytorch.kernels.ScaleKernel(
                 gpytorch.kernels.MaternKernel(nu=2.5, ard_num_dims=train_x.shape[-1] - 1)
@@ -239,19 +297,23 @@ class HierarchicalGP(gpytorch.models.ExactGP):
         ])
 
     def forward(self, x):
-        # x[..., :-1] = input, x[..., -1] = task index
+        # x[..., :-1] = input, x[..., -1] = task index (integer)
         x_input = x[..., :-1]
         task_idx = x[..., -1].long()
         mean = self.mean_module(x_input)
+
+        # 概念式（実行不可）：
+        # cov = k_global(x_input, x_input)
+        #     + sum_i (1[task_idx == i] outer 1[task_idx == i]) * k_dev_i(x_input, x_input)
+        # 実装は block_diagonal_by_task の mask で行う（本節 skeleton 対象外）
         cov_global = self.global_kernel(x_input)
-        # task 固有 deviation は kernel を task-block で足し合わせ
-        # （簡易表現、実装は task_idx で mask する）
-        cov = cov_global  # + block_diag(deviation_kernels[i](x_input[task_idx==i]))
+        cov = cov_global  # ← 実装未完（deviation を必ず追加すること）
+
         return gpytorch.distributions.MultivariateNormal(mean, cov)
 ```
 
 > [!NOTE]
-> 上記は骨格のみ。実運用では **partial pooling** の実装（deviation kernel を task index で block-diag マスク、length scale の階層事前分布）が必要。GPyTorch example の `heteroskedastic_gp` や PyMC の階層モデル実装を参考にする。
+> 実装参考：GPyTorch example の multitask 系、PyMC の階層 GP 実装（`pm.gp.MarginalKron` + task 分割）、または NumPyro の hierarchical GP。BO ループへ統合する際は BoTorch との bridge を GPyTorch model として実装する。
 
 ### 11.4.3 vol-02 との橋渡し
 
@@ -286,21 +348,29 @@ parallel_facility_policy:
     facility_B: 1
     facility_C: 2
   pending_experiments_visibility: "cross_facility"   # enum: cross_facility | per_facility_only
-  # cross_facility: 装置 A の pending experiment も装置 B の候補選択時に考慮（fantasize）
 ```
 
+**cross_facility の意味**：装置 A の pending 実験点 $(x_{\text{pending}}, \text{facility\_id}=A)$ を **joint multi-task posterior 上で fantasize**（共有 surrogate の task-indexed 点として組み込む）してから、装置 B 向けの候補を選択する。装置ごとに独立 GP を持つのではなく、単一の共有 surrogate 内で task index を切り替える。
+
 > [!IMPORTANT]
-> `pending_experiments_visibility: cross_facility` を使う場合、装置 A の未完了実験の予測値を装置 B の GP で fantasize する必要がある。第12章の `fantasize` API を参照。
+> `pending_experiments_visibility: cross_facility` の実装詳細（fantasize API、posterior sampling）は第12章を参照。
 
 ---
 
 ## 11.6 装置差を「無視」する誤り
 
-**Agentic 特有の失敗パターン**：エージェントが「同じレシピなら装置に依存しない」と誤仮定し、`facility_id` を入力から drop する。
+**Agentic 特有の失敗パターン**：エージェントが「同じレシピなら装置に依存しない」と誤仮定し、`facility_id` を入力から drop する、または学習後の task covariance が全装置完全相関に collapse する。
 
-- **検知**：`kernel_spec` に `task_kernel` / `deviation_kernel` が明示されているのに、実際の学習で $B$ が単位行列に collapse（全装置が完全相関）していないか監視
-- **予防**：`task_correlation_matrix` を Group C provenance に記録、毎 iteration の値を audit
-- **契約**：`facility_id` は `search_space_bounds` の一部として immutable、Skill が drop すれば fatal
+- **検知**：`task_correlation_matrix`（正規化）$\tilde B$ を Group C provenance に毎 iteration 記録
+  - $\tilde B \to \mathbf{1}\mathbf{1}^\top$（全成分 1 に近い）→ **装置差学習失敗 / facility_id 実質無視** の警告
+  - $\tilde B \to I$（単位行列に近い）→ **partial pooling 効かず**、装置ごとに cold start に戻っている警告
+- **予防**：`facility_id` は以下すべてに保持されなければならず、いずれかで drop されれば fatal：
+  - raw observation schema
+  - モデル学習入力（task encoding 前）
+  - `task_index_spec.task_map`
+  - candidate generation の context
+  - provenance の feature column hash
+- **契約**：`facility_id` は task-conditioning 変数として `task_index_spec` で管理、continuous normalization / ARD length_scale の対象から除外
 
 ---
 
@@ -337,9 +407,10 @@ parallel_facility_policy:
 ### 本書内
 
 - vol-02 第11章：階層モデル（partial pooling）
+- 第3章 §3.5：context / surrogate drift の fatal ルール（task_map 変更、facility_id drop）
 - 第5章 §5.2：`surrogate_model_family` の初出、`facility_id` の位置付け
-- 第6章：GP の基本、kernel 選択
-- 第7章 / 第8章：HRD の 3 判定（本章の task_kernel と整合させる）
+- 第6章：GP の基本、kernel 選択、`facility_id` の categorical 扱いから本章への橋渡し
+- 第7章 / 第8章：HRD の 3 判定（本章の input_kernel と接続、task_kernel は距離計算から除外）
 - 第10章：制約付き BO（本章の task 別 constraint と組み合わせる）
 - 第12章（planned）：Batch × multi-task（`pending_experiments` の cross_facility 可視性）
 - 第14章（planned）：capstone（因果 × HierGP × constrained × batch）

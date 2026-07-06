@@ -444,6 +444,10 @@ prohibited_actions:
   - approve_without_reviewer_signatures       # fatal
   - approve_cpdag_or_pag_directly             # fatal（先に方向づけ手続き必須）
   - approve_when_bundle_sha_mismatch          # fatal（提案時から入力が変わっている）
+  - adjust_for_post_treatment_variable_without_marking_as_mediator  # fatal（Ch14 §14.1.1 で back-register、§5.2.5 post-treatment adjustment）
+  - adjust_for_collider_declared_in_dag       # fatal（Ch14 §14.1.2 で back-register、§5.2.3 collider bias）
+  - modify_adjustment_set_after_downstream_start  # fatal（Ch14 §14.1.2 で back-register、Phase 2/3 開始後の集合改変）
+  - claim_dag_of_record_without_hypothesis_uri_and_e_value_probe  # fatal（Ch14 §14.1.1）
 approver: causal_review_board
 approver_independence:
   conflict_policy: independent_reviewer_required_if_approver_is_data_producer

@@ -735,6 +735,17 @@ skill:
     # --- B-6: mixed model（blocking 宣言時必須）2 fatal ---
     - swap_mixed_model_specification_between_design_and_analysis  # fatal（Ch10 N-5）
     - random_effects_missing_declared_blocking_factor     # fatal（同上）
+    # --- Ch14 §14.3.5 で back-register: seed pinning 3 種類 ---
+    - overwrite_estimator_random_seed_after_pin           # fatal（Ch14 §14.3.5）
+    - overwrite_bootstrap_seed_after_pin                  # fatal（Ch14 §14.3.5）
+    - execute_with_seed_mismatch_between_pin_and_execution  # fatal（Ch14 §14.3.5、3 種類 seed のいずれか）
+    # --- Ch14 §14.2.4 で back-register: Taguchi SN 比意味論 ---
+    - misdeclare_sn_ratio_type                            # fatal（Ch14 §14.2.4、nominal_the_best/smaller_the_better/larger_the_better の宣言と optimization target の不一致）
+    - report_sn_only_without_mean_variance_separation     # fatal（Ch14 §14.2.4、平均効果と分散効果を分離せず SN 比のみ報告）
+    - interpret_taguchi_sn_as_pure_variance_index_without_loss_function  # fatal（Ch14 §14.2.4、loss function 未宣言の SN 比使用）
+    # --- Ch14 §14.2.3 で back-register: 応答曲面外挿 ---
+    - report_optimum_outside_gp_support                   # fatal（Ch14 §14.2.3、GP support envelope 外の最適条件を actionable として報告）
+    - propose_response_surface_optimum_without_scope_gate # fatal（Ch14 §14.2.3、Phase 2 counterfactual_scope_gate 未発火で最適条件提案）
 
   # === ⑥ 再現性条件 ===
   library_stack:
@@ -742,7 +753,16 @@ skill:
     surrogate: smt==2.4.0                                  # or GPy | scikit-learn.GaussianProcess
     analysis: statsmodels==0.14.0
   environment_lock_uri: <string>
-  random_seed: 42
+  random_seed: 42                                          # 従来 canonical（DoE 実行の randomization_seed）
+  # === Ch14 §14.3.5 で back-register: 3 種類 seed pinning ===
+  estimator_random_seed:                                   # 応答曲面 fit / GP hyperparameter 最適化の seed
+    seed_value: <int>
+    seed_pinned_at: <timestamp>
+    seed_pin_evidence_uri: <string>
+  bootstrap_seed:                                          # bootstrap CI / cross-validation の seed
+    seed_value: <int>
+    seed_pinned_at: <timestamp>
+    seed_pin_evidence_uri: <string>
   container_sha256: <string>
 
   # === ⑦ 承認ゲート ===

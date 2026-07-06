@@ -77,7 +77,7 @@ detection_check:
         expected: all_confounders_pre_treatment
         fail_action: fail_close_and_flag_post_treatment_adjustment
     - unmeasured_confounder_probe:             # Ch9 §9.7.3 E-value
-        e_value_threshold: 1.25                 # E-value < 閾値 → unmeasured confounder に脆弱
+        e_value_threshold: 1.5                  # Ch4 §4.5 canonical と統一（N-2 修正）
         current_e_value: <float>
         fail_action: require_sensitivity_analysis_or_re_dag
     - mediator_direction_check:                # Ch5 §5.2.2 mediator vs Ch5 §5.2.3 collider
@@ -86,14 +86,16 @@ detection_check:
         fail_action: fail_close_and_request_dag_revision
   human_review_required_when:
     - any_automated_check_status: fail
-    - unmeasured_confounder_probe.current_e_value: less_than_1.5
-  fatal_action_referenced:                     # Ch4-13 から引用
-    - Ch5.report_estimate_without_dag_uri
-    - Ch5.adjust_for_post_treatment_variable
-    - Ch9.report_effect_without_refutation_when_declared_required
+    - unmeasured_confounder_probe.current_e_value: less_than_1.5  # Ch4 §4.5 minimum_e_value と一致
+  fatal_action_referenced:                     # Ch4-13 canonical + Ch14 新設に prefix で区別（B-1 修正）
+    - Ch5.adjust_for_post_treatment_variable_without_marking_as_mediator  # Ch5 §5.6 に back-register 済み
+    - Ch5.claim_dag_of_record_without_hypothesis_uri_and_e_value_probe    # Ch5 §5.6 に back-register 済み
+    - Ch4.Table_4_4_item_16                                                # Ch4 §4.8 item 16 (post-treatment adjustment)
+    - Ch9.report_effect_without_refutation_when_declared_required          # Ch9 §9.7.1 実在
+    - Ch4.Table_4_4_item_2                                                 # Ch4 §4.8 item 2 (Unauthorized DAG modification)
 ```
 
-**修復方法**：DAG を revise し、`approved_dag_sha256` を新しい hash に差し替える。Ch4 §4.6.4 の evidence chain 再構築が必要（下流の estimator も rerun）。**Ch4 fatal `modify_approved_dag_after_downstream_start`** に該当する場合は、Skill 契約上は **プロジェクトの巻き戻し**（Phase 1 差戻し）を意味し、operator への告知が必須。
+**修復方法**：DAG を revise し、`approved_dag_sha256` を新しい hash に差し替える。Ch4 §4.6.4 の evidence chain 再構築が必要（下流の estimator も rerun）。**Ch13 §13.5 fatal `modify_approved_dag_after_downstream_start`** に該当する場合は、Skill 契約上は **プロジェクトの巻き戻し**（Phase 1 差戻し）を意味し、operator への告知が必須。
 
 **Ch14 canonical fatal（新設）**：
 
@@ -134,17 +136,20 @@ detection_check:
         m_bias_risk: high | medium | low       # 両方 true なら high
         fail_action: fail_close_and_require_sensitivity_or_re_dag
   fatal_action_referenced:
-    - Ch5.adjust_for_collider_declared_in_dag
-    - Ch5.adjust_for_post_treatment_variable
+    - Ch5.adjust_for_collider_declared_in_dag                 # Ch5 §5.6 に back-register 済み
+    - Ch5.adjust_for_post_treatment_variable_without_marking_as_mediator  # Ch5 §5.6 back-register
+    - Ch5.modify_adjustment_set_after_downstream_start        # Ch5 §5.6 back-register
+    - Ch4.Table_4_4_item_3                                    # Ch4 §4.8 item 3 (Adjustment of collider without authorization)
+    - Ch4.Table_4_4_item_17                                   # Ch4 §4.8 item 17 (silent 変更)
 ```
 
-**修復方法**：Ch5 §5.2.3 の backdoor criterion を再適用し、adjustment set から collider を除外。Ch6 の estimator を rerun し、`approved_dag_sha256` は変更なし（DAG spec 自体は正しく、estimator の実装バグ）。ただし推定値が変わるため、Phase 2/3 が既に開始されている場合は Ch4 fatal `modify_approved_dag_after_downstream_start` の**類似 pattern** として `modify_adjustment_set_after_downstream_start` を新設。
+**修復方法**：Ch5 §5.2.3 の backdoor criterion を再適用し、adjustment set から collider を除外。Ch6 の estimator を rerun し、`approved_dag_sha256` は変更なし（DAG spec 自体は正しく、estimator の実装バグ）。ただし推定値が変わるため、Phase 2/3 が既に開始されている場合は Ch13 §13.5 fatal `modify_approved_dag_after_downstream_start` の**類似 pattern** として `modify_adjustment_set_after_downstream_start` を Ch5 §5.6 に back-register 済み。
 
-**Ch14 canonical fatal（新設）**：
+**参照する fatal**（Ch5 §5.6 back-register 済み）：
 
 ```yaml
-- modify_adjustment_set_after_downstream_start                        # collider 削除も含む
-- reuse_adjustment_set_across_dag_versions_without_reverification     # DAG が変わったら adjustment 再検証
+- Ch5.modify_adjustment_set_after_downstream_start                        # collider 削除も含む
+- Ch14.reuse_adjustment_set_across_dag_versions_without_reverification    # Ch14 新設: DAG が変わったら adjustment 再検証
 ```
 
 ### 14.1.3 Positivity violation（陽性条件破綻）
@@ -185,17 +190,19 @@ detection_check:
           practical: request_additional_data_or_doe
           ambiguous: fail_close_and_request_human_review
   fatal_action_referenced:
-    - Ch4.report_cate_without_positivity_by_stratum
-    - Ch13.report_cate_without_positivity_by_stratum
+    - Ch4.Table_4_4_item_6                              # Positivity 違反を無視して estimation
+    - Ch13.report_cate_without_positivity_by_stratum    # Ch13 §13.5 実在 fatal
+    - Ch14.report_ate_or_cate_without_stratum_level_positivity_check   # Ch14 新設
+    - Ch14.classify_practical_non_positivity_as_structural_without_evidence  # Ch14 新設
 ```
 
 **修復方法**：`applicability_manifest` に **除外領域を pre-register** し（Ch4 §4.8）、CATE 推定を restrict domain に限定。Phase 2 で DoE を打つ場合は、除外領域の外側で追加 DoE を発注（Ch10）。
 
-**Ch14 canonical fatal（新設）**：
+**Ch14 canonical fatal（新設、動詞開始 naming に統一 — N-10）**：
 
 ```yaml
-- report_ate_or_cate_without_stratum_level_positivity_check
-- classify_practical_non_positivity_as_structural_without_evidence
+- Ch14.report_ate_or_cate_without_stratum_level_positivity_check
+- Ch14.classify_practical_non_positivity_as_structural_without_evidence
 ```
 
 ### 14.1.4 外挿 unwarranted（正当化されない外挿）
@@ -234,9 +241,9 @@ detection_check:
         phase_3_method: <expected_string>
         fail_action_if_identical: fatal_reuse_counterfactual_scope_gate_check_names_across_phases_without_operational_distinction
   fatal_action_referenced:
-    - Ch4.report_intervention_recommendation_outside_counterfactual_scope
-    - Ch13.report_intervention_recommendation_without_mediator_decomposition
-    - Ch13.reuse_counterfactual_scope_gate_check_names_across_phases_without_operational_distinction
+    - Ch4.Table_4_4_item_12b                                # Scope gate 逸脱・SMT 応答曲面の明示的外挿
+    - Ch13.report_intervention_recommendation_without_mediator_decomposition   # Ch13 §13.5 実在
+    - Ch13.reuse_counterfactual_scope_gate_check_names_across_phases_without_operational_distinction  # Ch13 §13.5 実在
 ```
 
 **修復方法**：外挿領域で介入を推奨せず、代わりに **追加 DoE を提案**（Ch10 §10.5）または **Bayesian DoE で情報利得の高い候補**（Ch12 §12.5）を提案。介入実行を停止することが必須。
@@ -270,8 +277,9 @@ detection_check:
         honest_split_used: <bool>
         fail_action_if_false: rerun_estimator_with_honest_splitting
   fatal_action_referenced:
-    - Ch4.report_cate_without_positivity_by_stratum
-    - Ch8.claim_heterogeneity_without_cv_stability_report
+    - Ch4.Table_4_4_item_6                              # Positivity 違反
+    - Ch14.claim_heterogeneity_without_cv_stability_report   # Ch14 新設
+    - Ch14.publish_cate_by_stratum_with_stratum_n_below_minimum_without_low_confidence_flag  # Ch14 新設
 ```
 
 **修復方法**：層を粗く集約（例：`instrument_id × operator_id` を `instrument_id` のみに）、または honest splitting で causal forest を rerun。
@@ -335,7 +343,7 @@ detection_check:
 
 **原因**：Ch10 §10.5.3 の 4-stage assignment_log detection（`seed_match` / `assignment_order_match` / `execution_order_match` / `assignment_log_header_recorded`）のいずれかが fail。
 
-**検出契約**：
+**検出契約（Ch10 §10.5.3 canonical に 1:1 対応 — B-2 修正）**：
 
 ```yaml
 detection_check:
@@ -346,28 +354,29 @@ detection_check:
     - Ch10.randomization_seed_pinned_at
     - Ch10.assignment_log_header_uri
   automated_checks:
-    - seed_match_check:                        # Ch10 §10.5.3 stage 1
+    - seed_match:                              # Ch10 §10.5.3 stage 1（canonical 名）
         expected_seed: <from_pre_registration>
         actual_seed: <from_assignment_log>
         fail_action: fatal_randomization_seed_mismatch
-    - assignment_order_match_check:            # stage 2
-        expected_order_uri: <string>
-        actual_order_uri: <string>
-        order_diff: <list_of_swaps>
-        fail_action: fatal_assignment_order_altered_post_randomization
-    - execution_order_match_check:             # stage 3
+    - design_hash_match:                       # Ch10 §10.5.3 stage 2（canonical 名）
+        expected_design_sha256: <from_pre_registration>
+        actual_design_sha256: <from_execution_records>
+        fail_action: fatal_design_matrix_altered_post_pin
+    - permutation_reproducibility:             # Ch10 §10.5.3 stage 3（byte-exact 再生成）
+        replay_library: <string>                # Ch10 §10.5.3 で pin された permutation library
+        replay_library_version: <string>
+        replay_policy: byte_exact               # canonical value
+        replay_status: pass | fail
+        fail_action: fatal_permutation_not_byte_exact
+    - execution_records_binding:               # Ch10 §10.5.3 stage 4（execution bind）
         planned_execution_order: <list>
         actual_execution_order: <list>
-        deviation_report_uri: <string>
-        fail_action: fail_close_and_reroll_with_new_seed
-    - assignment_log_header_check:             # stage 4
-        header_recorded: <bool>
-        header_uri: <string>
-        fail_action: fatal_assignment_log_missing_header_record
+        binding_evidence_uri: <string>
+        fail_action: fatal_execution_records_unbound_to_assignment
   fatal_action_referenced:
-    - Ch10.modify_design_matrix_after_randomization_seed_pinned
-    - Ch10.assignment_log_missing_header_record
-    - Ch13.modify_design_matrix_after_randomization_seed_pinned
+    - Ch10.modify_design_matrix_after_randomization_seed_pinned  # Ch10 §10.8 実在
+    - Ch13.modify_design_matrix_after_randomization_seed_pinned  # Ch13 §13.5 実在
+    - Ch14.publish_ate_with_execution_records_unbound_to_assignment  # Ch14 新設
 ```
 
 **修復方法**：Randomization を **新しい seed で再実施**。既存の実験結果は「pilot data」として保持するが、正式な ATE 推定には使わない。Ch10 §10.5 の Skill 契約により、operator が「時間が惜しい」を理由に旧データを使うことは fatal に該当。
@@ -406,8 +415,9 @@ detection_check:
         max_min_ratio_threshold: 2.0
         fail_action: report_weighted_ate_with_weights_uri
   fatal_action_referenced:
-    - Ch10.report_effect_without_blocking_when_declared_blocked
-    - Ch10.misdeclare_block_type
+    - Ch10.report_effect_without_blocking_when_declared_blocked   # Ch10 §10.8 back-register 済み
+    - Ch10.misdeclare_block_type                                   # Ch10 §10.8 back-register 済み
+    - Ch10.report_effect_with_confounded_blocking_without_flag    # Ch10 §10.8 back-register 済み
 ```
 
 **Ch14 canonical fatal（新設）**：
@@ -417,45 +427,45 @@ detection_check:
 - report_effect_with_confounded_blocking_without_flag
 ```
 
-### 14.2.3 応答曲面外挿誤用
+### 14.2.3 応答曲面外挿誤用（GP 特有チェック — N-7 で純化）
 
-**症状**：Ch11 の GP surrogate / polynomial 応答曲面を、**訓練 support の外** で評価し、最適条件として提案。
+**症状**：Ch11 の GP surrogate 応答曲面を、**訓練 support の外** で評価し、最適条件として提案。Envelope 一般の外挿検出は §14.1.4 に集約し、本節は **GP 予測分散と CCD α value** に純化する。
 
 **原因**：Ch11 §11.7 の `counterfactual_scope_gate`（Phase 2）が bypass された、または `threshold_calibration` が未実施。Ch13 §13.4.3 の canonical diff で示した通り、Phase 2 は **strict mode** の `support_envelope_check` が必須。
 
-**検出契約**：
+**検出契約（GP-specific: predictive variance + CCD α value のみ — N-7 修正）**：
 
 ```yaml
 detection_check:
-  check_id: response_surface_extrapolation_check
-  check_type: gp_predictive_variance_and_support
+  check_id: response_surface_gp_extrapolation_check
+  check_type: gp_predictive_variance_and_alpha_integrity   # envelope 一般は §14.1.4 参照
   linked_provenance:
     - Ch11.response_surface_provenance_uri
     - Ch11.counterfactual_scope_gate_uri
   automated_checks:
-    - gp_predictive_variance_bounds:
+    - gp_predictive_variance_bounds:           # GP 特有：predictive variance が calibrated threshold を超えないか
         query_points: <from_optimization_output>
         predictive_variance_at_query: <list>
         variance_threshold: <from_calibration>
         fail_action: fail_close_and_reject_optimization_output
-    - convex_hull_check:                       # design space の凸包
-        hull_uri: <string>
-        query_inside_hull: <bool>
-        fail_action_if_false: fail_close_and_extend_design_range
-    - alpha_value_check:                       # Ch11 S-3 canonical
+    - alpha_value_check:                       # Ch11 S-3 canonical、CCD 特有
         expected_alpha: 1.68179283050743        # CCD α value
         actual_alpha: <float>
+        alpha_tolerance: 1e-9
         fail_action_if_mismatch: fatal_alpha_value_drift
   fatal_action_referenced:
-    - Ch11.report_optimum_outside_gp_support
-    - Ch11.propose_response_surface_optimum_without_scope_gate
+    - Ch11.report_optimum_outside_gp_support_without_scope_gate      # Ch11 §11.8 back-register 済み
+    - Ch11.publish_response_surface_optimum_without_alpha_value_pin  # Ch11 §11.8 back-register 済み
 ```
+
+> [!NOTE]
+> Envelope-based の外挿検出（convex hull, support bounds）は §14.1.4 の `unwarranted_extrapolation_check` に集約されている。本節は GP surrogate 特有の predictive variance と CCD α value drift のみを扱う。
 
 ### 14.2.4 タグチ SN 比誤解釈
 
 **症状**：Taguchi 直交表による experiment で、SN 比（signal-to-noise ratio）を **平均効果と分散効果の分離** ではなく、**単なる分散指標** として使用。分散最小化と平均最適化が同一視される。
 
-**原因**：Taguchi 手法の哲学的前提（loss function、robust design）を無視して、SN 比の数値のみを ranking に使用。Ch10 §10.6.2 の robust design 節が触れているが、Skill 実装で誤解される頻度が高い。
+**原因**：Taguchi 手法の哲学的前提（loss function、robust design）を無視して、SN 比の数値のみを ranking に使用。**Ch11 §11.6.2 の Taguchi SN 比 SoT**（nominal_the_best / smaller_the_better / larger_the_better enum + `switch_sn_ratio_type_after_execution: fatal`）が canonical。（N-3 修正: cite 先を Ch10 → Ch11 §11.6.2）
 
 **検出契約**：
 
@@ -464,8 +474,8 @@ detection_check:
   check_id: taguchi_sn_ratio_interpretation_check
   check_type: sn_ratio_semantic_integrity
   linked_provenance:
-    - Ch10.taguchi_design_provenance_uri
-    - Ch10.sn_ratio_type_declared              # nominal_the_best | smaller_the_better | larger_the_better
+    - Ch11.taguchi_design_provenance_uri         # Ch11 §11.6.2
+    - Ch11.sn_ratio_type_declared                # nominal_the_best | smaller_the_better | larger_the_better
   automated_checks:
     - sn_ratio_type_vs_optimization_target:
         declared_sn_type: <string>
@@ -482,8 +492,9 @@ detection_check:
         both_present: <bool>
         fail_action_if_false: fatal_report_sn_only_without_mean_variance_separation
   fatal_action_referenced:
-    - Ch10.report_sn_only_without_mean_variance_separation
-    - Ch10.misdeclare_sn_ratio_type
+    - Ch11.switch_sn_ratio_type_after_execution                  # Ch11 §11.8 back-register 済み
+    - Ch11.publish_taguchi_result_without_loss_function_uri      # Ch11 §11.8 back-register 済み
+    - Ch11.report_sn_only_without_mean_variance_separation       # Ch11 §11.8 back-register 済み
 ```
 
 **Ch14 canonical fatal（新設）**：
@@ -534,9 +545,11 @@ detection_check:
         evidence_chain_sha256_stored: <string>
         fail_action_if_mismatch: fatal_evidence_chain_tampering
   fatal_action_referenced:
-    - Ch4.modify_approved_dag_after_downstream_start
-    - Ch13.modify_evidence_chain_after_approval
-    - Ch13.modify_evidence_chain_sha256_input_fields_after_publication
+    - Ch13.modify_approved_dag_after_downstream_start                       # Ch13 §13.5 実在
+    - Ch13.modify_evidence_chain_after_approval                             # Ch13 §13.5 実在
+    - Ch13.modify_evidence_chain_sha256_input_fields_after_publication      # Ch13 §13.5 実在
+    - Ch4.Table_4_4_item_2                                                  # Ch4 §4.8 item 2 (Unauthorized DAG modification)
+    - Ch4.Table_4_4_item_17                                                 # Ch4 §4.8 item 17 (silent 変更)
 ```
 
 ### 14.3.2 Confounder 勝手削除
@@ -566,22 +579,23 @@ detection_check:
         boundary_violation: <bool>
         fail_action_if_true: fatal_agent_autonomous_covariate_removal
   fatal_action_referenced:
-    - Ch4.execute_estimator_without_variable_selection_authorization
-    - Ch4.agent_autonomous_action_beyond_declared_class
+    - Ch4.Table_4_4_item_5                                       # Ch4 §4.8 item 5 (execute_estimator_without_variable_selection_authorization)
+    - Ch4.Table_4_4_item_9                                       # Ch4 §4.8 item 9 (agent_autonomous_action_beyond_declared_class)
+    - Ch14.silently_remove_covariate_from_approved_adjustment_set  # Ch14 新設
 ```
 
-**Ch14 canonical fatal（新設）**：
+**Ch14 canonical fatal（新設、動詞開始 naming に統一 — N-10）**：
 
 ```yaml
-- agent_autonomous_covariate_removal
-- agent_autonomous_adjustment_set_reduction
+- Ch14.silently_remove_covariate_from_approved_adjustment_set
+- Ch14.autonomously_reduce_adjustment_set_below_approved_size
 ```
 
 ### 14.3.3 感度分析スキップ（sensitivity analysis skip）
 
 **症状**：`refutation_gate_provenance` に E-value / Rosenbaum bounds / placebo test の記録が無いまま `intervention_recommendation` が発行される。§14.1.6 の refutation スキップと類似だが、Agentic 特有版では **エージェントが「時間が惜しい」「効果は明白」を理由に意図的に省略** する。
 
-**原因**：Skill の action_class が `propose_only` ではなく `propose_and_execute` の場合、エージェントが gate 自体を bypass する誘惑にさらされる。Ch4 §4.5.2 の canonical では `refutation_gate` は L2（variable_selection_authorization）の前提条件だが、Skill 実装で強制されないと skip される。
+**原因**：Skill の action_class が `propose_only` ではなく `propose_and_execute` の場合、エージェントが gate 自体を bypass する誘惑にさらされる。Ch4 §4.5.2 の canonical では `refutation_gate` は L2（variable_selection_authorization）の前提条件だが、Skill 実装で強制されないと skip される。**Skill の意図的 bypass 記録は `agent_action_log`（Ch4 §4.9 template ⑨ に back-register 済み）から取得。**（N-5 修正）
 
 **検出契約**：
 
@@ -592,6 +606,7 @@ detection_check:
   linked_provenance:
     - Ch9.refutation_gate_provenance_uri
     - Ch4.variable_selection_authorization_provenance
+    - Ch4.agent_action_log_uri                 # §4.9 template ⑨
   automated_checks:
     - refutation_gate_completeness_pre_l2_check:
         refutation_gate_pass_before_l2: <bool>
@@ -599,23 +614,25 @@ detection_check:
         refutation_gate_timestamp: <timestamp>
         temporal_ordering: refutation_gate_before_l2
         fail_action_if_violated: fatal_l2_authorization_without_prior_refutation_gate
-    - e_value_threshold_check:                 # Ch9 §9.7.3
+    - e_value_threshold_check:                 # Ch4 §4.5 minimum_e_value canonical と統一 (N-2)
         e_value_declared: <float>
-        e_value_threshold: 1.25                 # canonical
+        e_value_threshold: 1.5                  # Ch4 §4.5 canonical
         fail_action_if_below: fail_close_and_require_re_sensitivity
-    - agent_action_log_check:                  # Skill が gate を bypass する試みを記録
-        gate_bypass_attempts: <list>
-        fail_action_if_nonempty: fatal_agentic_gate_bypass_attempt
+    - agent_action_log_check:                  # Ch4 §4.9 template ⑨ (agent_action_log) を照会
+        agent_action_log_uri: <string>
+        gate_bypass_attempts: <list>            # log 内の bypass 試行
+        fail_action_if_nonempty: fatal_attempt_agentic_gate_bypass
   fatal_action_referenced:
-    - Ch9.report_effect_without_refutation_when_declared_required
-    - Ch4.l2_authorization_without_prior_refutation_gate
+    - Ch9.report_effect_without_refutation_when_declared_required   # Ch9 §9.7.1 実在
+    - Ch4.Table_4_4_item_22                                          # Ch4 §4.8 item 22 (audit_manifest 逸脱)
+    - Ch14.attempt_agentic_gate_bypass                               # Ch14 新設
 ```
 
 ### 14.3.4 「介入した」勝手記録（silent intervention logging）
 
 **症状**：介入実行の実績ログ（`intervention_execution_log`）が、**Human 承認前** に生成されているか、あるいは **承認と異なる介入** を「承認された介入」として記録。
 
-**原因**：Ch4 §4.6.3 の `intervention_execution_authorization` の temporal ordering 契約が不完全。Skill が「介入を先に実施して事後承認を取る」パターンで実装される（fail-forward）。
+**原因**：Ch4 §4.6.3 の `intervention_execution_authorization` の temporal ordering 契約が不完全。Skill が「介入を先に実施して事後承認を取る」パターンで実装される（fail-forward）。**Ch4 §4.6.2 に本節で back-register 済み**（`intervention_execution_timestamp` + `temporal_ordering` block）。（B-3 note）
 
 **検出契約**：
 
@@ -624,12 +641,12 @@ detection_check:
   check_id: silent_intervention_logging_check
   check_type: intervention_execution_temporal_integrity
   linked_provenance:
-    - Ch4.intervention_execution_authorization_provenance
+    - Ch4.intervention_execution_authorization_provenance    # §4.6.2 に temporal_ordering block back-register 済み
     - Ch13.evidence_chain
   automated_checks:
     - temporal_ordering_l3_before_execution:
         l3_authorization_timestamp: <timestamp>
-        intervention_execution_timestamp: <timestamp>
+        intervention_execution_timestamp: <timestamp>       # Ch4 §4.6.2 back-register 済み
         fail_action_if_violated: fatal_intervention_executed_before_l3_authorization
     - intervention_uri_match_check:
         approved_intervention_uri: <string>
@@ -644,17 +661,16 @@ detection_check:
         approval_within_log_range: <bool>
         fail_action_if_false: fatal_intervention_log_predates_approval
   fatal_action_referenced:
-    - Ch4.intervention_executed_before_l3_authorization
-    - Ch4.intervention_executed_differs_from_approved
-    - Ch13.execute_intervention_without_evidence_chain_complete
+    - Ch4.Table_4_4_item_18                                            # Ch4 §4.8 item 18 (temporal ordering violation)
+    - Ch4.Table_4_4_item_19                                            # Ch4 §4.8 item 19 (executed_differs_from_approved)
+    - Ch13.execute_intervention_without_evidence_chain_complete        # Ch13 §13.5 実在
 ```
 
-**Ch14 canonical fatal（新設）**：
+**Ch14 canonical fatal（新設、動詞開始 naming — N-10）**：
 
 ```yaml
-- intervention_executed_before_l3_authorization
-- intervention_executed_differs_from_approved
-- intervention_log_predates_approval
+- Ch14.execute_intervention_before_l3_authorization        # Ch4 §4.8 item 18 と対応
+- Ch14.log_intervention_before_l3_approval_timestamp
 ```
 
 ### 14.3.5 Reproducibility seed 上書き
@@ -687,22 +703,24 @@ detection_check:
         bootstrap_seed_at_execution: <int>
         fail_action_if_any_mismatch: fatal_seed_mismatch_at_execution
   fatal_action_referenced:
-    - Ch10.modify_design_matrix_after_randomization_seed_pinned
-    - Ch11.overwrite_estimator_seed_after_pin
+    - Ch10.modify_design_matrix_after_randomization_seed_pinned    # Ch10 §10.8 実在
+    - Ch11.overwrite_estimator_random_seed_after_pin               # Ch11 §11.8 back-register 済み
+    - Ch11.overwrite_bootstrap_seed_after_pin                      # Ch11 §11.8 back-register 済み
+    - Ch11.publish_estimate_with_seed_mismatch_between_pin_and_execution  # Ch11 §11.8 back-register 済み
 ```
 
-**Ch14 canonical fatal（新設）**：
+**Ch14 canonical fatal（新設、動詞開始 naming — N-10）**：
 
 ```yaml
-- seed_overwrite_after_pin
-- seed_mismatch_at_execution
+- Ch14.overwrite_pinned_seed_during_execution      # 上記 Ch10/Ch11 fatal の Ch14 側 aggregation
+- Ch14.publish_estimate_with_seed_mismatch_at_execution
 ```
 
 ### 14.3.6 CATE 推薦を Human 未承認で外部送信
 
 **症状**：Skill が CATE 推定結果と「推奨介入条件」を、**Human 承認前** に外部（実運用系、他プロジェクト、報告書）へ送信。
 
-**原因**：Ch4 §4.6.3 の L3 authorization が strict でなく、Skill の action_class が `propose_and_broadcast` に近い実装。
+**原因**：Ch4 §4.6.3 の L3 authorization が strict でなく、Skill の action_class が `propose_and_broadcast` に近い実装。**送信先チャネル宣言（`egress_channels_declared`）と `authorized_broadcast_targets` は Ch4 §4.9 template ⑩ egress_control に back-register 済み**（N-6 修正）。
 
 **検出契約**：
 
@@ -712,11 +730,13 @@ detection_check:
   check_type: intervention_recommendation_egress_control
   linked_provenance:
     - Ch4.intervention_execution_authorization_provenance
-    - Ch4.egress_channels_declared               # 送信先チャネル宣言
+    - Ch4.egress_control_uri                    # Ch4 §4.9 template ⑩ に back-register 済み
+    - Ch4.egress_channels_declared              # egress_control block 内
+    - Ch4.authorized_broadcast_targets          # egress_control block 内
   automated_checks:
     - egress_channel_authorization_check:
         broadcast_events: <list_from_audit_log>
-        authorized_channels: <list>
+        authorized_channels: <list>              # Ch4 §4.9 template ⑩ から取得
         unauthorized_broadcasts: <list>
         fail_action_if_nonempty: fatal_intervention_recommendation_broadcast_without_l3
     - external_project_transfer_check:         # Ch13 §13.4.4 evidence chain 流用
@@ -730,23 +750,126 @@ detection_check:
         all_broadcasts_after_approval: <bool>
         fail_action_if_false: fatal_broadcast_predates_l3_authorization
   fatal_action_referenced:
-    - Ch4.intervention_recommendation_broadcast_without_l3
-    - Ch13.reuse_evidence_chain_across_projects_without_re_authorization
+    - Ch4.Table_4_4_item_20                                                # Ch4 §4.8 item 20 (broadcast without L3)
+    - Ch13.reuse_evidence_chain_across_projects_without_re_authorization   # Ch13 §13.5 実在
 ```
 
-**Ch14 canonical fatal（新設）**：
+**Ch14 canonical fatal（新設、動詞開始 naming — N-10）**：
 
 ```yaml
-- intervention_recommendation_broadcast_without_l3
-- broadcast_predates_l3_authorization
-- external_transfer_of_cate_recommendation_without_re_authorization
+- Ch14.broadcast_intervention_recommendation_without_l3_authorization
+- Ch14.broadcast_before_l3_authorization_timestamp
+- Ch14.transfer_cate_recommendation_externally_without_re_authorization
+```
+
+### 14.3.7 施設標準の silent 継承（silent facility standard inheritance） — B-6 追加
+
+**症状**：Phase 3 で承認された介入条件が「施設標準」として `approved_intervention_becomes_facility_standard` に昇格されるが、L4 gate（`facility_standard_promotion_gate`、Ch4 §4.6.1 back-register 済み）を経ずに他プロジェクトから **暗黙的に参照** される。
+
+**原因**：`facility_scope_escalation` の pre_conditions（`audit_manifest_v1_pass` 等、Ch4 §4.6.2 に back-register 済み）が enforce されない、または他プロジェクトの Skill が `facility_standard_uri` を直接参照して認可プロセスをスキップ。
+
+**検出契約**：
+
+```yaml
+detection_check:
+  check_id: silent_facility_standard_inheritance_check
+  check_type: l4_gate_bypass_detection
+  linked_provenance:
+    - Ch4.facility_scope_escalation_uri          # §4.6.2 back-register 済み
+    - Ch4.facility_standard_promotion_gate_uri   # §4.6.1 L4 gate back-register 済み
+  automated_checks:
+    - l4_gate_pre_conditions_check:
+        audit_manifest_v1_pass: <bool>
+        pre_conditions_all_pass: <bool>
+        fail_action_if_false: fatal_bypass_facility_standard_promotion_gate
+    - facility_standard_reference_provenance:
+        referencing_project_ids: <list>
+        each_reference_has_l4_authorization_uri: <bool>
+        fail_action_if_missing: fatal_reference_facility_standard_without_l4_authorization
+  fatal_action_referenced:
+    - Ch4.Table_4_4_item_23                                # Ch4 §4.8 item 23 (L4 promotion violation)
+    - Ch14.bypass_facility_standard_promotion_gate         # Ch14 新設
+    - Ch14.reference_facility_standard_without_l4_authorization  # Ch14 新設
+```
+
+### 14.3.8 逐次ベイズ prior chain 断絶（sequential Bayesian prior chain break） — B-6 追加
+
+**症状**：Ch12 の逐次ベイズ更新で、Phase N の posterior が Phase N+1 の prior として使われるべきところ、**中間で prior が黙って再初期化** される。または `prior_family` の enum（theta/mu/tau、Ch12 §12.2.2 canonical）が Phase 間で silent に切替わる。
+
+**原因**：Skill が「convergence 改善」を理由に prior を reset、または `prior_family` の canonical enum を **operationally 同一** の別名で流用（Ch13 §13.5 `reuse_counterfactual_scope_gate_check_names_across_phases_without_operational_distinction` の親戚パターン）。
+
+**検出契約**：
+
+```yaml
+detection_check:
+  check_id: sequential_bayesian_prior_chain_break_check
+  check_type: prior_posterior_chain_immutability
+  linked_provenance:
+    - Ch12.prior_provenance_chain_uri
+    - Ch12.prior_family_declared                # theta | mu | tau (Ch12 §12.2.2 canonical)
+  automated_checks:
+    - posterior_to_prior_binding_check:
+        phase_n_posterior_sha256: <string>
+        phase_n_plus_1_prior_sha256: <string>
+        binding_verified: <bool>
+        fail_action_if_false: fatal_break_prior_posterior_chain
+    - prior_family_enum_stability_check:       # theta/mu/tau が Phase 間で silent に変わっていないか
+        prior_family_at_phase_1: <string>
+        prior_family_at_phase_2: <string>
+        prior_family_at_phase_3: <string>
+        enum_change_authorized: <bool>          # 変更するなら pre-register が必要
+        fail_action_if_unauthorized_change: fatal_silently_switch_prior_family_enum_across_phases
+    - prior_reset_authorization_check:
+        prior_reset_events: <list>
+        each_reset_has_authorization_uri: <bool>
+        fail_action_if_unauthorized: fatal_reset_prior_without_authorization
+  fatal_action_referenced:
+    - Ch14.break_prior_posterior_chain                            # Ch14 新設
+    - Ch14.silently_switch_prior_family_enum_across_phases        # Ch14 新設
+    - Ch14.reset_prior_without_authorization                      # Ch14 新設
+```
+
+### 14.3.9 Evidence chain の推移的無効化（transitive evidence chain invalidation） — B-6 追加
+
+**症状**：Project A の evidence chain が、Project B の Skill 実行で参照されるが、Project A の evidence chain が **事後に修正** された結果、Project B の主張が silent に無効化。監査時に initial run では pass だが再監査では fail になる。
+
+**原因**：Ch13 §13.4.4 の `evidence_chain_sha256_input_fields` の推移的整合性が不在。Project A の evidence chain が update されても、Project B の参照が pin されず、両者の整合性が事後に破綻。
+
+**検出契約**：
+
+```yaml
+detection_check:
+  check_id: transitive_evidence_chain_invalidation_check
+  check_type: cross_project_evidence_pin_integrity
+  linked_provenance:
+    - Ch13.evidence_chain
+    - Ch13.evidence_chain_sha256_input_fields    # §13.4.4 に audit_manifest_uri/sha256 back-register 済み
+  automated_checks:
+    - cross_project_reference_pin_check:
+        referenced_evidence_chain_ids: <list>
+        each_reference_pins_evidence_chain_sha256: <bool>
+        fail_action_if_unpinned: fatal_reference_external_evidence_chain_without_sha256_pin
+    - transitive_recomputation_check:          # 再監査時に全ての参照先の sha256 を再計算
+        current_referenced_sha256_map: <dict>
+        pinned_referenced_sha256_map: <dict>
+        drift_detected: <bool>
+        fail_action_if_drift: fatal_transitive_evidence_chain_drift
+    - audit_manifest_immutability_check:       # audit_manifest_uri/sha256 の推移
+        audit_manifest_at_original_run: <string>
+        audit_manifest_at_reaudit: <string>
+        immutability_verified: <bool>
+        fail_action_if_false: fatal_modify_audit_manifest_input_fields_after_publication
+  fatal_action_referenced:
+    - Ch13.modify_evidence_chain_sha256_input_fields_after_publication  # Ch13 §13.5 実在
+    - Ch13.modify_audit_manifest_input_fields_after_publication         # Ch13 §13.5 back-register 済み
+    - Ch14.reference_external_evidence_chain_without_sha256_pin         # Ch14 新設
 ```
 
 ---
 
 ## 14.4 統合監査契約テンプレート（audit_manifest canonical）
 
-§14.1-§14.3 の 16 パターン全てを **1 つの audit run** で検出する canonical テンプレート：
+§14.1-§14.3 の **19 パターン**（causal 6 + DoE 4 + agentic 9）を **1 つの audit run** で検出する canonical テンプレート：
 
 ```yaml
 audit_manifest_v1:                             # Ch14 §14.4 canonical
@@ -757,7 +880,7 @@ audit_manifest_v1:                             # Ch14 §14.4 canonical
     audit_started_at: <timestamp>
     audit_completed_at: <timestamp>
     audit_scope_uri: <string>                   # 対象プロジェクトの manifest.yaml
-  detection_checks:                             # §14.1-14.3 の 16 checks
+  detection_checks:                             # §14.1-14.3 の 19 checks (B-6 で 3 追加)
     causal_general:
       - dag_misspecification_check              # §14.1.1
       - collider_bias_check                     # §14.1.2
@@ -766,9 +889,9 @@ audit_manifest_v1:                             # Ch14 §14.4 canonical
       - cate_over_individualization_check       # §14.1.5
       - refutation_gate_skip_check              # §14.1.6
     doe_general:
-      - randomization_integrity_check           # §14.2.1
+      - randomization_integrity_check           # §14.2.1 (Ch10 §10.5.3 canonical に 1:1 対応)
       - blocking_design_integrity_check         # §14.2.2
-      - response_surface_extrapolation_check    # §14.2.3
+      - response_surface_gp_extrapolation_check # §14.2.3 (GP-specific に純化)
       - taguchi_sn_ratio_interpretation_check   # §14.2.4
     agentic_specific:
       - silent_dag_modification_check           # §14.3.1
@@ -777,13 +900,24 @@ audit_manifest_v1:                             # Ch14 §14.4 canonical
       - silent_intervention_logging_check       # §14.3.4
       - seed_overwrite_check                    # §14.3.5
       - unauthorized_broadcast_check            # §14.3.6
+      - silent_facility_standard_inheritance_check       # §14.3.7 (B-6)
+      - sequential_bayesian_prior_chain_break_check      # §14.3.8 (B-6)
+      - transitive_evidence_chain_invalidation_check     # §14.3.9 (B-6)
   audit_result_summary:
+    total_checks_expected: 19                   # invariant (N-8)
     pass_count: <int>
     fail_count: <int>
     not_applicable_count: <int>                 # applicability_manifest で pre-register 済み
     critical_fails: <list>                      # fatal に該当した fails
+    invariants:                                 # N-8 追加
+      - name: check_count_sum_invariant
+        formula: pass_count + fail_count + not_applicable_count == total_checks_expected
+        fail_action: fatal_audit_result_summary_count_mismatch
+      - name: critical_fails_subset_of_fail
+        formula: critical_fails ⊆ fail_list
+        fail_action: fatal_critical_fails_not_subset_of_fail
   aggregate_policy:
-    pass_requires: all_16_pass_or_pre_registered
+    pass_requires: all_19_pass_or_pre_registered   # B-6 で 16 → 19
     fail_action: fail_close_and_route_to_facility_causal_review_board
     escalation_path:
       - research_lead
@@ -791,7 +925,7 @@ audit_manifest_v1:                             # Ch14 §14.4 canonical
       - ethics_review_board                      # 人的介入を含む場合
   fallback_message_template: |
     Audit {audit_manifest_id} on project {project_id} completed at {audit_completed_at}.
-    Result: {pass_count}/16 checks passed, {fail_count} failed, {not_applicable_count} pre-registered as non-applicable.
+    Result: {pass_count}/19 checks passed, {fail_count} failed, {not_applicable_count} pre-registered as non-applicable.
     Critical fails requiring review: {critical_fails}.
     Escalation route: {escalation_path[0]}.
     Reference the following provenance for evidence:
@@ -801,9 +935,52 @@ audit_manifest_v1:                             # Ch14 §14.4 canonical
     - evidence_chain_sha256: {evidence_chain_sha256}
 ```
 
+### 14.4.1 audit_manifest_v1 実行例（YAML instance — S-1 追加）
+
+Ch13 §13.7 の 3-phase capstone（Cu 4 wt% 施設標準昇格ケース）に対する audit run 実行例。critical_fails が 0 個で pass するケースを示す：
+
+```yaml
+audit_manifest_v1_instance:                     # S-1: canonical YAML instance
+  audit_manifest_id: audit_cu4wt_phase3_pre_facility_promotion
+  audit_run_provenance:
+    auditor_type: mixed
+    auditor: audit_skill@v1.2.3+human_review_lead=arim_causal_board_chair
+    audit_started_at: '2026-05-01T09:00:00+09:00'
+    audit_completed_at: '2026-05-01T14:30:00+09:00'
+    audit_scope_uri: 's3://arim/projects/pj00001_cu_alloy_20260117/manifest.yaml'
+  detection_check_results:
+    dag_misspecification_check: pass
+    collider_bias_check: pass
+    positivity_violation_check: pass
+    unwarranted_extrapolation_check: pass       # scope_gate 3 phase 全 pass
+    cate_over_individualization_check: pass     # honest splitting 済み
+    refutation_gate_skip_check: pass            # placebo + random_common_cause + E-value 済み
+    randomization_integrity_check: pass         # 4-stage 全 byte-exact
+    blocking_design_integrity_check: pass       # instrument_id × operator_id complete
+    response_surface_gp_extrapolation_check: pass  # α value 1.68179283050743 一致
+    taguchi_sn_ratio_interpretation_check: not_applicable  # Taguchi 未使用（pre-registered）
+    silent_dag_modification_check: pass         # approved_dag_sha256 一致
+    silent_confounder_removal_check: pass       # approved_covariates 一致
+    agentic_sensitivity_skip_check: pass        # gate_bypass_attempts=[]
+    silent_intervention_logging_check: pass     # L3 approval < intervention_timestamp
+    seed_overwrite_check: pass                  # 3 seed 全 pin match
+    unauthorized_broadcast_check: pass          # broadcast_events=[] pre-promotion
+    silent_facility_standard_inheritance_check: pass  # L4 pre_conditions all pass
+    sequential_bayesian_prior_chain_break_check: pass # posterior→prior binding 3-hop OK
+    transitive_evidence_chain_invalidation_check: pass # cross-project ref=0
+  audit_result_summary:
+    total_checks_expected: 19
+    pass_count: 18
+    fail_count: 0
+    not_applicable_count: 1                     # taguchi
+    critical_fails: []
+  gate_result: pass
+  facility_promotion_authorization: authorized  # L4 gate pass 済み
+```
+
 **運用ポリシー**：
-- **audit 実行タイミング**：Phase 3 完了時（介入実行承認前）に必ず 1 回、および facility standard として promotion される前に 1 回。Ch4 §4.6.2 の `facility_scope_escalation.applies_to` enum に `approved_intervention_becomes_facility_standard` が含まれる場合、audit_manifest の pass が **前提条件**。
-- **audit の immutability**：`audit_result_uri` と `audit_result_sha256` は evidence chain に組み込まれる。Ch13 §13.4.4 の `evidence_chain_sha256_input_fields` に `audit_manifest_uri` と `audit_manifest_sha256` を追加すべき（Ch13 の canonical 拡張候補）。
+- **audit 実行タイミング**：Phase 3 完了時（介入実行承認前）に必ず 1 回、および facility standard として promotion される前に 1 回。Ch4 §4.6.2 の `facility_scope_escalation.applies_to` enum に `approved_intervention_becomes_facility_standard` が含まれる場合、audit_manifest の pass が **前提条件**（Ch4 §4.6.2 に back-register 済み、B-4）。
+- **audit の immutability**：`audit_result_uri` と `audit_result_sha256` は evidence chain に組み込まれる。**Ch13 §13.4.4 の `evidence_chain_sha256_input_fields` に `audit_manifest_uri` と `audit_manifest_sha256` を back-register 済み**（B-5）。`modify_audit_manifest_input_fields_after_publication` は Ch13 §13.5 に fatal として back-register 済み。
 
 ---
 
@@ -828,29 +1005,46 @@ skill_contract:                                 # Ch4 §4.7 canonical に準拠
     - audit_manifest_sha256
     - audit_result_uri
     - audit_result_sha256
-  prohibited_actions:                           # Ch14 §14.3 の Agentic fatal を統合
-    - modify_audit_manifest_after_completion    # 監査結果の改竄
-    - skip_detection_check_without_applicability_manifest
-    - claim_audit_pass_without_running_all_16_checks
-    - reuse_audit_manifest_across_projects_without_re_run
+  prohibited_actions:                           # Ch14 §14.3 の Agentic fatal を統合（動詞開始 naming — N-10）
+    - Ch14.modify_audit_manifest_after_completion               # 監査結果の改竄
+    - Ch14.skip_detection_check_without_applicability_manifest
+    - Ch14.claim_audit_pass_without_running_all_19_checks       # B-6: 16 → 19
+    - Ch14.reuse_audit_manifest_across_projects_without_re_run
+    - Ch14.modify_audit_manifest_input_fields_after_publication  # Ch13 §13.5 と対応
   fallback_approver: facility_causal_review_board
+```
+
+**audit_skill_contract フロー図（S-2 追加）**：
+
+```mermaid
+graph LR
+  A[Ch4/Ch5/Ch13 provenance] --> B[audit_skill v1]
+  B --> C[19-check detection]
+  C -->|pass_count=19| D[audit_manifest_uri + sha256]
+  C -->|any fail| E[fail_close]
+  D --> F[L4 facility_standard_promotion_gate]
+  F -->|human review| G[facility_causal_review_board]
+  G -->|approved| H[evidence_chain_sha256 に組込]
+  H --> I[Ch13 §13.4.4 audit_manifest_uri/sha256 pinned]
+  E --> J[facility_causal_review_board escalation]
 ```
 
 ### 14.5.2 facility_standard_promotion_gate（L4 gate 新設）
 
-Ch4 §4.6.2 の `facility_scope_escalation` を **operational な gate** として実装：
+Ch4 §4.6.2 の `facility_scope_escalation` を **operational な gate** として実装（**Ch4 §4.6.1 L4 row と §4.6.2 pre_conditions/gate_level に back-register 済み** — B-4）：
 
 ```yaml
-facility_standard_promotion_gate:               # Ch14 で新設、Ch4 §4.6.2 の operational 版
+facility_standard_promotion_gate:               # Ch4 §4.6.1 L4 row に back-register 済み
   gate_level: L4_facility_standard_promotion
   input_provenance:
     - audit_manifest_uri
     - audit_result_uri
     - Ch4.facility_scope_escalation.applies_to  # 拡張対象
-  pre_conditions:
-    - audit_result_summary.pass_count: 16       # 全 checks pass
+  pre_conditions:                               # Ch4 §4.6.2 に back-register 済み
+    - audit_result_summary.pass_count: 19       # B-6: 16 → 19
     - audit_result_summary.fail_count: 0
     - critical_fails: []
+    - audit_manifest_v1_pass: true              # Ch4 §4.6.2 canonical
   approval_layer:
     - facility_causal_review_board_approval:
         approver: facility_causal_review_board
@@ -860,60 +1054,61 @@ facility_standard_promotion_gate:               # Ch14 で新設、Ch4 §4.6.2 �
     - approved_facility_standard_uri: <string>
     - approved_facility_standard_sha256: <string>
     - back_registration_to_ch04_enum: true      # Ch4 §4.6.2 enum に追記
-  prohibited_actions:
-    - promote_to_facility_standard_without_audit_manifest_pass
-    - modify_facility_standard_after_promotion_without_new_audit
+  prohibited_actions:                           # 動詞開始 naming — N-10
+    - Ch14.promote_to_facility_standard_without_audit_manifest_pass
+    - Ch14.modify_facility_standard_after_promotion_without_new_audit
 ```
 
 ---
 
 ## 14.6 Ch14 特有の prohibited_actions（fatal 統合）
 
-§14.1-§14.5 で新設した Ch14 特有の fatal action を統合：
+§14.1-§14.5 で新設した Ch14 特有の fatal action を統合（全て `Ch14.` prefix、動詞開始 naming — N-10）：
 
 ```yaml
 prohibited_actions:
   # === Section 1: 因果推論一般 ===
-  - adjust_for_post_treatment_variable_without_marking_as_mediator     # §14.1.1
-  - claim_dag_of_record_without_hypothesis_uri_and_e_value_probe       # §14.1.1
-  - modify_adjustment_set_after_downstream_start                        # §14.1.2
-  - reuse_adjustment_set_across_dag_versions_without_reverification     # §14.1.2
-  - report_ate_or_cate_without_stratum_level_positivity_check           # §14.1.3
-  - classify_practical_non_positivity_as_structural_without_evidence    # §14.1.3
-  - claim_heterogeneity_without_cv_stability_report                     # §14.1.5
-  - publish_cate_by_stratum_with_stratum_n_below_minimum_without_low_confidence_flag  # §14.1.5
-  - post_hoc_applicability_manifest                                     # §14.1.6
-  - downgrade_declared_required_tests_enum_version_silently             # §14.1.6
+  - Ch14.report_ate_or_cate_without_stratum_level_positivity_check           # §14.1.3
+  - Ch14.classify_practical_non_positivity_as_structural_without_evidence    # §14.1.3
+  - Ch14.claim_heterogeneity_without_cv_stability_report                     # §14.1.5
+  - Ch14.publish_cate_by_stratum_with_stratum_n_below_minimum_without_low_confidence_flag  # §14.1.5
+  # Note: §14.1.1/§14.1.2 の modify_adjustment_set_after_downstream_start 等は Ch5 §5.6 に back-register 済み
+  # Note: §14.1.6 post_hoc_applicability_manifest は Ch9 §9.7.1 reclassify_failed_required_test_as_not_applicable_post_hoc と統合 (N-1)
 
   # === Section 2: DoE 一般 ===
-  - misdeclare_block_type                                               # §14.2.2
-  - report_effect_with_confounded_blocking_without_flag                 # §14.2.2
-  - misdeclare_sn_ratio_type                                            # §14.2.4
-  - report_sn_only_without_mean_variance_separation                     # §14.2.4
-  - interpret_taguchi_sn_as_pure_variance_index_without_loss_function   # §14.2.4
+  - Ch14.publish_ate_with_execution_records_unbound_to_assignment            # §14.2.1
+  # Note: §14.2.2 blocking, §14.2.3 GP alpha drift, §14.2.4 Taguchi SN は Ch10/Ch11 §11.8 に back-register 済み
 
   # === Section 3: Agentic 特有 ===
-  - agent_autonomous_covariate_removal                                  # §14.3.2
-  - agent_autonomous_adjustment_set_reduction                           # §14.3.2
-  - agentic_gate_bypass_attempt                                         # §14.3.3
-  - l2_authorization_without_prior_refutation_gate                      # §14.3.3
-  - intervention_executed_before_l3_authorization                       # §14.3.4
-  - intervention_executed_differs_from_approved                         # §14.3.4
-  - intervention_log_predates_approval                                  # §14.3.4
-  - seed_overwrite_after_pin                                            # §14.3.5
-  - seed_mismatch_at_execution                                          # §14.3.5
-  - intervention_recommendation_broadcast_without_l3                    # §14.3.6
-  - broadcast_predates_l3_authorization                                 # §14.3.6
-  - external_transfer_of_cate_recommendation_without_re_authorization   # §14.3.6
+  - Ch14.silently_remove_covariate_from_approved_adjustment_set              # §14.3.2
+  - Ch14.autonomously_reduce_adjustment_set_below_approved_size              # §14.3.2
+  - Ch14.attempt_agentic_gate_bypass                                         # §14.3.3
+  - Ch14.execute_intervention_before_l3_authorization                        # §14.3.4
+  - Ch14.log_intervention_before_l3_approval_timestamp                       # §14.3.4
+  - Ch14.overwrite_pinned_seed_during_execution                              # §14.3.5
+  - Ch14.publish_estimate_with_seed_mismatch_at_execution                    # §14.3.5
+  - Ch14.broadcast_intervention_recommendation_without_l3_authorization      # §14.3.6
+  - Ch14.broadcast_before_l3_authorization_timestamp                         # §14.3.6
+  - Ch14.transfer_cate_recommendation_externally_without_re_authorization    # §14.3.6
+  - Ch14.bypass_facility_standard_promotion_gate                             # §14.3.7 (B-6)
+  - Ch14.reference_facility_standard_without_l4_authorization                # §14.3.7 (B-6)
+  - Ch14.break_prior_posterior_chain                                         # §14.3.8 (B-6)
+  - Ch14.silently_switch_prior_family_enum_across_phases                     # §14.3.8 (B-6)
+  - Ch14.reset_prior_without_authorization                                   # §14.3.8 (B-6)
+  - Ch14.reference_external_evidence_chain_without_sha256_pin                # §14.3.9 (B-6)
 
   # === Section 4/5: 監査契約 ===
-  - modify_audit_manifest_after_completion                              # §14.5.1
-  - skip_detection_check_without_applicability_manifest                 # §14.5.1
-  - claim_audit_pass_without_running_all_16_checks                      # §14.5.1
-  - reuse_audit_manifest_across_projects_without_re_run                 # §14.5.1
-  - promote_to_facility_standard_without_audit_manifest_pass            # §14.5.2
-  - modify_facility_standard_after_promotion_without_new_audit          # §14.5.2
+  - Ch14.modify_audit_manifest_after_completion                              # §14.5.1
+  - Ch14.skip_detection_check_without_applicability_manifest                 # §14.5.1
+  - Ch14.claim_audit_pass_without_running_all_19_checks                      # §14.5.1 (B-6: 16 → 19)
+  - Ch14.reuse_audit_manifest_across_projects_without_re_run                 # §14.5.1
+  - Ch14.promote_to_facility_standard_without_audit_manifest_pass            # §14.5.2
+  - Ch14.modify_facility_standard_after_promotion_without_new_audit          # §14.5.2
+  # Note: modify_audit_manifest_input_fields_after_publication は Ch13 §13.5 に back-register 済み
 ```
+
+> [!NOTE]
+> 上記に加え、§14.1-§14.2 で「back-register 済み」と marking したものは対応する Ch4/Ch5/Ch9/Ch10/Ch11/Ch13 の canonical fatal を参照する。Ch14 §14.6 は **Ch14 が mint した fatal のみ** を列挙し、他章 canonical との重複を避ける（B-1 修正）。
 
 ---
 
@@ -933,21 +1128,24 @@ prohibited_actions:
 - [ ] `response_surface_extrapolation_check` が Ch11 S-3 canonical の $\alpha = 1.68179283050743$ を verify する
 - [ ] `taguchi_sn_ratio_interpretation_check` が SN 比 type と optimization target の semantic match を検査する
 
-**Section 3（Agentic 特有、§14.3）**
+**Section 3（Agentic 特有、§14.3、9 パターン — B-6 で 3 追加）**
 - [ ] `silent_dag_modification_check` が Ch13 §13.4.4 の `evidence_chain_sha256` を verify する（RFC 8785 canonical JSON）
 - [ ] `silent_confounder_removal_check` が Ch4 §4.5.2 の approved_covariates と実 estimator input の symmetric difference を検査する
 - [ ] `agentic_sensitivity_skip_check` が refutation_gate と L2 authorization の temporal ordering を確認する
 - [ ] `silent_intervention_logging_check` が execution timestamp と approval timestamp の順序を strict に検証する
 - [ ] `seed_overwrite_check` が全 3 種類の seed（randomization / estimator / bootstrap）を対象とする
 - [ ] `unauthorized_broadcast_check` が egress channel 宣言と実 broadcast events を照合する
+- [ ] `silent_facility_standard_inheritance_check` が L4 gate pre_conditions と参照先の L4 authorization を検査する（B-6）
+- [ ] `sequential_bayesian_prior_chain_break_check` が posterior→prior binding と prior_family enum の Phase 間安定性を確認する（B-6）
+- [ ] `transitive_evidence_chain_invalidation_check` が cross-project evidence chain の sha256 pin と再監査時の drift を検出する（B-6）
 
 **Section 4/5（監査契約、§14.4-§14.5）**
-- [ ] `audit_manifest_v1` が 16 個の detection_check を全て含む
-- [ ] `audit_result_summary` が critical_fails を独立に集計する
-- [ ] `facility_standard_promotion_gate` は L4 gate として新設され、Ch4 §4.6.2 の operational 版として位置付けられている
+- [ ] `audit_manifest_v1` が 19 個の detection_check を全て含む（B-6: 16 → 19）
+- [ ] `audit_result_summary` が critical_fails を独立に集計し、`total_checks_expected: 19` invariant を持つ（N-8）
+- [ ] `facility_standard_promotion_gate` は L4 gate として新設され、Ch4 §4.6.1 の L4 row と §4.6.2 の pre_conditions に back-register 済み（B-4）
 - [ ] `audit_skill_contract` は `role: human_required` かつ `action_class: propose_and_execute_with_gate` である
-- [ ] Ch14 特有 fatal 30 個以上が §14.6 で列挙されている
-- [ ] audit_manifest_sha256 は Ch13 §13.4.4 の `evidence_chain_sha256_input_fields` に組み込むことが議論されている
+- [ ] Ch14 特有 fatal は §14.6 で `Ch14.` prefix で列挙され、Ch4-13 canonical との重複が無い（B-1）
+- [ ] audit_manifest_sha256 は Ch13 §13.4.4 の `evidence_chain_sha256_input_fields` に組み込み済み（B-5）
 
 ---
 
@@ -963,11 +1161,22 @@ Ch13 §13.1.2 のシナリオで `instrument=C` の propensity score が 0.05 �
 
 ### 演習 14.3（silent DAG modification の CI/CD 検出）
 
-§14.3.1 の `silent_dag_modification_check` を GitHub Actions に組み込み、`approved_dag_sha256` と `evidence_chain_sha256` の verify を PR 時に自動実行する workflow を書け。Ch13 §13.4.4 の RFC 8785 canonical JSON の Python 実装（例：`rfc8785` package）を使い、hash 再計算のテストケースを 3 個以上作成せよ。
+§14.3.1 の `silent_dag_modification_check` を GitHub Actions に組み込み、`approved_dag_sha256` と `evidence_chain_sha256` の verify を PR 時に自動実行する workflow を書け。Ch13 §13.4.4 の RFC 8785 canonical JSON の Python 実装を使い、hash 再計算のテストケースを 3 個以上作成せよ。
+
+**RFC 8785 実装ライブラリ permitted list（N-9 追加）**：
+
+| ライブラリ | 言語 | 公式性 | 推奨用途 |
+|---|---|---|---|
+| `rfc8785` (Trail of Bits) | Python | active maintenance | Python プロジェクトの primary 実装 |
+| `json-canonicalize` | Python | community | Python secondary 実装（cross-check 用） |
+| `canonicalize` (npm) | JavaScript/TypeScript | community | Node.js 側の verify |
+| `jscanonicalization` | Go | active | Go MCP server 側 |
+
+演習では **少なくとも 2 つの実装** で hash 一致を verify し、byte-exact 再現性の cross-implementation 検証を含めよ。
 
 ### 演習 14.4（audit_manifest の運用）
 
-§14.4 の `audit_manifest_v1` を Ch13 の capstone シナリオに適用し、16 checks の run を PyMC / DoWhy / EconML の実装で埋めよ。`critical_fails` に該当するケースを **意図的に 3 個作り**、`fail_close_and_route_to_facility_causal_review_board` の escalation flow を Mermaid で図示せよ。
+§14.4 の `audit_manifest_v1` を Ch13 の capstone シナリオに適用し、**19 checks の run** を PyMC / DoWhy / EconML の実装で埋めよ。`critical_fails` に該当するケースを **意図的に 3 個作り**、`fail_close_and_route_to_facility_causal_review_board` の escalation flow を Mermaid で図示せよ。
 
 ### 演習 14.5（Agentic fail-close 経路の設計）
 
@@ -1000,3 +1209,18 @@ Ch13 §13.1.2 のシナリオで `instrument=C` の propensity score が 0.05 �
 - ISO/IEC 42001:2023 *Information technology — Artificial intelligence — Management system*. — AI システム監査
 - RFC 8785 *JSON Canonicalization Scheme (JCS)*. — evidence_chain_sha256 の canonical 計算基盤
 - Sculley, D., et al. (2015). *Hidden Technical Debt in Machine Learning Systems*. NeurIPS. — Agentic 環境で silent modification が起きる pattern
+
+---
+
+### 巻境界の告知（vol-05 / vol-06 boundary — S-3 追加）
+
+本章の 19-check `audit_manifest_v1` と L4 gate は、**vol-04 の因果 × DoE × Agentic 認可** を対象範囲とする。以下の関連領域は **本巻の範囲外** であり、後続巻で扱う：
+
+| 領域 | 本巻での扱い | 対応巻 |
+|---|---|---|
+| ML/DL モデルの学習時ガバナンス（training data lineage、hyperparameter search authorization） | 因果 estimator の一部としてのみ登場 | **vol-05** |
+| 大規模 LLM / foundation model の agent 委譲（tool use、multi-agent orchestration） | 3 層承認の枠組みのみ | **vol-05** |
+| 組織横断ガバナンス（複数施設連合、federated learning、differential privacy） | 単一施設内 L4 gate のみ | **vol-06** |
+| 規制対応（GxP、GDPR、AI Act）と audit の legal binding | ISO/IEC 42001 レベル参照のみ | **vol-06** |
+
+本章で確立した `audit_manifest_v1` と `evidence_chain_sha256_input_fields` の canonical schema は、後続巻で **superset として拡張** される予定（後方互換性維持）。

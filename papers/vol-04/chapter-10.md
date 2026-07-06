@@ -758,6 +758,10 @@ skill:
     - omit_alias_structure_sha256                                     # fatal (N-6)
     - swap_mixed_model_specification_between_design_and_analysis      # fatal (N-5)
     - random_effects_missing_declared_blocking_factor                 # fatal (N-5)
+    - modify_design_matrix_after_randomization_seed_pinned            # fatal (Ch13 §13.5 で mint、Ch14 §14.2.1 で参照、Ch10 §10.5.3 4-stage detection の背景 fatal として本節で back-register)
+    - report_effect_without_blocking_when_declared_blocked            # fatal (Ch14 §14.2.2 で back-register — blocking を declare しながら分析で無視)
+    - misdeclare_block_type                                           # fatal (Ch14 §14.2.2 で back-register — complete/incomplete の宣言と実態の不一致)
+    - report_effect_with_confounded_blocking_without_flag             # fatal (Ch14 §14.2.2 で back-register — treatment × block 独立性違反時の flag 欠如)
 
   # === ⑥ 再現性条件（L3: 実行レイヤ） ===
   library_stack:

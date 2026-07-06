@@ -763,6 +763,9 @@ evidence_chain:
     - response_surface_provenance_uri
     - refutation_gate_provenance_uri
     - "counterfactual_scope_gate_history[*].{phase, gate_status, timestamp}"
+    # === Ch14 §14.4/§14.5 で back-register: audit_manifest 組み込み ===
+    - audit_manifest_uri                        # Ch14 §14.4 canonical
+    - audit_manifest_sha256                     # Ch14 §14.4 canonical（audit_manifest immutability の chain 化）
   evidence_chain_sha256: 8b1d3c...              # 上記フィールドを canonical JSON 化して sha256
 ```
 
@@ -809,6 +812,9 @@ prohibited_actions:
   # === Scope gate 一貫性 ===
   - bypass_scope_gate_reverification_between_phases                                       # fatal（Phase 遷移時に scope gate をスキップ）
   - reuse_counterfactual_scope_gate_check_names_across_phases_without_operational_distinction  # fatal（Phase 1/2/3 で同じ mapping key を operationally 同一の意味で流用）
+
+  # === Ch14 §14.4/§14.5 で back-register: audit_manifest immutability ===
+  - modify_audit_manifest_input_fields_after_publication  # fatal（B-5: audit_manifest_uri/sha256 の hash 計算入力の後付け改変）
 ```
 
 ---

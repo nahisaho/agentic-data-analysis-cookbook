@@ -1443,8 +1443,8 @@ provenance:
 | **目的** | 生成候補が学習分布内か（統計軸 z_M/z_R）＋ 物理不整合スコア軸（v）の canonical 合成 | 生成候補が物理法則に整合するか（決定論的整合性、H の v 軸 provenance を owns） | 生成候補が合成前例に近いか（heuristic 合成容易性） |
 | **判定基準** | composite score `0.4*z_M + 0.4*z_R + 0.2*v`（Ch5 §5.4 / Ch10 canonical、v は F provenance の rule violation 正規化） | Pymatgen rule + matminer 1D 統計しきい値 | SC/SA/RA score / hull distance / ICSD 類似度 |
 | **入力** | 候補の特徴量ベクトル / 生成器 latent + F ステージ provenance（v 軸算出用） | 候補の組成 dict（+ 結晶なら Structure） | 候補の組成 or SMILES |
-| **出力** | flag: bool + composite_score: float | survivors + rejected + rule log（H に provenance を渡す） | scored（reject なし） |
-| **Reject 判定** | hard reject（flag=true で下流に流さない） | hard reject（Filter A/B） | reject なし（soft score のみ） |
+| **出力** | scored_candidates (全候補、reject なし) に `ood_score: float ([0,1])` + `ood_flag: bool` + `positivity_violation: bool` を top-level 付与（内部 `hallucinatory_composition_detection` に composite_score / z_M / z_R / v 保持） | survivors + rejected + rule log（H に provenance を渡す） | scored（reject なし） |
+| **Reject 判定** | reject 禁止（Ch11 委譲、Ch10 §10.7 pass-through canonical、`ood_score`/`ood_flag`/`positivity_violation` 付与のみ、top-k は Ch11 が **`ood_score` を第 3 軸として** Pareto で判定） | hard reject（Filter A/B） | reject なし（soft score のみ） |
 | **依存 library** | scikit-learn (Mahalanobis) + numpy (PCA) + F provenance parser | Pymatgen + matminer | Pymatgen + RDKit + MP API |
 | **pipeline stage** | H（Ch2 §2.7、F 直後） | F（Ch2 §2.7、SF 直後） | S1（Ch2 §2.7、H 直後） |
 | **canonical Skill ID** | `arim.gen.ood_detection.v0.1` | `arim.gen.physics_filter.v0.1` | `arim.gen.synthesizability_proxy.v0.1` |

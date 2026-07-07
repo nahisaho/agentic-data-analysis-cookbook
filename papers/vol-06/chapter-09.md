@@ -1398,7 +1398,7 @@ S1 ステージで並走する 2 Skill の責務境界を Ch11 T ステージ入
 |---|---|---|---|
 | **pipeline stage** | S1（併走） | S1（併走） | H（両 S1 の upstream） |
 | **返す量** | 合成前例 proxy score（[0, 1] float） | 予測物性 dict + calibrated 不確かさ | ood_score + physical_violation |
-| **reject 契約** | reject 禁止（Ch11 委譲） | reject 禁止（Ch11 委譲） | H 単体で hard reject（violation ≥ threshold） |
+| **reject 契約** | reject 禁止（Ch11 委譲） | reject 禁止（Ch11 委譲） | reject 禁止（Ch11 委譲、Ch10 §10.7 pass-through canonical、`ood_flag`/`positivity_violation` を top-level に付与し top-k は Ch11 が決定） |
 | **入力 provenance 要件** | F/H pass 済み provenance 必須 | F/H pass 済み provenance 必須 | F pass 済み provenance 必須 |
 | **主要外部依存** | RDKit, pymatgen, Materials Project hull, ICSD | pymatgen, MEGNet/M3GNet/MACE weights | 学習分布統計 + F ステージ violation 数 |
 | **Ch11 での使途** | Pareto 第 1 軸（合成軸） | Pareto 第 2 軸（性能軸） | Pareto 第 3 軸（信頼軸） |

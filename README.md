@@ -188,7 +188,7 @@ Issue / PR は歓迎します。特に以下は大歓迎です。
 
 ## 👤 著者
 
-- **仁科 直哉**（[@nahisaho](https://github.com/nahisaho)）
+- **Hisaho Nakata**（[@nahisaho](https://github.com/nahisaho)）
 
 ---
 
